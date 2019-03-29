@@ -24,6 +24,27 @@ enum State<W> {
     Closing,
 }
 
+/// #Examples
+/// ```rust
+/// #![feature(async_await, await_macro, futures_api)]
+///
+/// use std::io::Cursor;
+/// use futures::executor::block_on;
+/// use futures::prelude::SinkExt;
+/// use packetstream::*;
+///
+/// let mut sink = PacketSink::new(Cursor::new(vec![0; 14]));
+/// block_on(async {
+///     await!(sink.send(Packet::new(IsStream::Yes,
+///                                  IsEnd::No,
+///                                  BodyType::Json,
+///                                  123,
+///                                  vec![1,2,3,4,5])));
+///     await!(sink.close());
+///     let buf = sink.into_inner().into_inner();
+///     assert_eq!(&buf, &[0b0000_1010, 0, 0, 0, 5, 0, 0, 0, 123, 1, 2, 3, 4, 5]);
+/// });
+/// ```
 pub struct PacketSink<W> {
     writer: Option<W>,
     state: State<W>
@@ -53,6 +74,10 @@ impl<W> PacketSink<W> {
             },
             State::Closing => panic!() // TODO?
         }
+    }
+
+    pub fn into_inner(&mut self) -> W {
+        self.writer.take().unwrap()
     }
 }
 

@@ -18,22 +18,20 @@ mod tests {
 
     #[test]
     fn encode() {
-        let mut msg = Packet {
-            is_stream: IsStream::Yes,
-            is_end: IsEnd::No,
-            body_type: BodyType::Json,
-            id: 123,
-            body: vec![0; 25],
-        };
+        let mut p = Packet::new(IsStream::Yes,
+                                IsEnd::No,
+                                BodyType::Json,
+                                123,
+                                vec![0; 25]);
 
         let expected_head: [u8; 9] = [0b0000_1010, 0, 0, 0, 25, 0, 0, 0, 123];
-        assert_eq!(msg.flags(), expected_head[0]);
-        assert_eq!(msg.header(), expected_head);
+        assert_eq!(p.flags(), expected_head[0]);
+        assert_eq!(p.header(), expected_head);
 
-        msg.is_end = IsEnd::Yes;
-        msg.is_stream = IsStream::No;
-        msg.body_type = BodyType::Binary;
-        assert_eq!(msg.flags(), 0b0000_0100);
+        p.is_end = IsEnd::Yes;
+        p.is_stream = IsStream::No;
+        p.body_type = BodyType::Binary;
+        assert_eq!(p.flags(), 0b0000_0100);
     }
 
     #[test]
@@ -46,42 +44,36 @@ mod tests {
         assert_eq!(body_len, 25);
         assert_eq!(id, 200);
 
-        let msg = Packet {
-            is_stream: head[0].into(),
-            is_end: head[0].into(),
-            body_type: head[0].into(),
-            id,
-            body: vec![0; body_len as usize],
-        };
+        let p = Packet::new(head[0].into(),
+                            head[0].into(),
+                            head[0].into(),
+                            id,
+                            vec![0; body_len as usize]);
 
-        assert_eq!(msg.header(), head);
+        assert_eq!(p.header(), head);
     }
 
 
     #[test]
     fn sink_stream() {
         let msgs = vec![
-            Packet {
-                is_stream: IsStream::Yes,
-                is_end: IsEnd::No,
-                body_type: BodyType::Binary,
-                id: 10,
-                body: vec![1,2,3,4,5],
-            },
-            Packet {
-                is_stream: IsStream::No,
-                is_end: IsEnd::Yes,
-                body_type: BodyType::Binary,
-                id: 2002,
-                body: (0..50).collect(),
-            },
-            Packet {
-                is_stream: IsStream::Yes,
-                is_end: IsEnd::No,
-                body_type: BodyType::Binary,
-                id: 12345,
-                body: (0..100).collect(),
-            }
+            Packet::new(IsStream::Yes,
+                        IsEnd::No,
+                        BodyType::Binary,
+                        10,
+                        vec![1,2,3,4,5]),
+
+            Packet::new(IsStream::No,
+                        IsEnd::Yes,
+                        BodyType::Utf8,
+                        2002,
+                        (0..50).collect()),
+
+            Packet::new(IsStream::Yes,
+                        IsEnd::Yes,
+                        BodyType::Json,
+                        12345,
+                        (0..100).collect())
         ];
 
         let msgs_clone = msgs.clone();

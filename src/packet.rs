@@ -9,6 +9,20 @@ pub struct Packet {
     pub body: Vec<u8>,
 }
 impl Packet {
+    pub fn new(is_stream: IsStream,
+               is_end: IsEnd,
+               body_type: BodyType,
+               id: i32,
+               body: Vec<u8>) -> Packet {
+        Packet {
+            is_stream,
+            is_end,
+            body_type,
+            id,
+            body
+        }
+    }
+
     pub(crate) fn flags(&self) -> u8 {
         self.is_stream as u8 | self.is_end as u8 | self.body_type as u8
     }

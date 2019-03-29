@@ -23,13 +23,11 @@ async fn recv<R: AsyncRead>(r: &mut R) -> Result<Option<Packet>, Error> {
     let mut body = vec![0; body_len as usize];
     await!(r.read_exact(&mut body))?;
 
-    Ok(Some(Packet {
-        is_stream: head[0].into(),
-        is_end: head[0].into(),
-        body_type: head[0].into(),
-        id,
-        body,
-    }))
+    Ok(Some(Packet::new(head[0].into(),
+                        head[0].into(),
+                        head[0].into(),
+                        id,
+                        body)))
 }
 
 async fn recv_move<R: AsyncRead + 'static>(mut r: R) -> (R, Result<Option<Packet>, Error>) {
@@ -43,27 +41,26 @@ type PinFut<O> = Pin<Box<dyn Future<Output=O> + 'static>>;
 /// ```rust
 /// #![feature(async_await, await_macro, futures_api)]
 ///
+/// use futures::executor::block_on;
 /// use futures::prelude::{SinkExt, StreamExt};
 /// use packetstream::*;
 ///
-/// let p = Packet {
-///     is_stream: IsStream::Yes,
-///     is_end: IsEnd::No,
-///     body_type: BodyType::Binary,
-///     id: 12345,
-///     body: vec![1,2,3,4,5]
-/// };
+/// let p = Packet::new(IsStream::Yes,
+///                     IsEnd::No,
+///                     BodyType::Binary,
+///                     12345,
+///                     vec![1,2,3,4,5]);
 ///
 /// let (writer, reader) = async_ringbuffer::ring_buffer(64);
 ///
 /// let mut sink = PacketSink::new(writer);
 /// let mut stream = PacketStream::new(reader);
-/// async {
+/// block_on(async {
 ///     await!(sink.send(p));
 ///     let r = await!(stream.next()).unwrap().unwrap();
 ///     assert_eq!(&r.body, &[1,2,3,4,5]);
 ///     assert_eq!(r.id, 12345);
-/// };
+/// });
 /// ```
 pub struct PacketStream<R> {
     reader: Option<R>,
