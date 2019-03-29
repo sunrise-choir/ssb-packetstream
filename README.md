@@ -1,5 +1,7 @@
 # Packet Stream
 
+[![Documentation](https://docs.rs/packetstream/badge.svg)](https://docs.rs/packetstream)
+
 ```rust
 #![feature(async_await, await_macro, futures_api)]
 
