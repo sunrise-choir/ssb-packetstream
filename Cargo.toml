@@ -1,0 +1,13 @@
+[package]
+name = "packetstream"
+version = "0.1.0"
+authors = ["sean billig <sean.billig@gmail.com>"]
+edition = "2018"
+license = "AGPL-3.0"
+
+[dependencies]
+byteorder = "1"
+futures-preview = "0.3.0-alpha.13"
+
+[dev-dependencies]
+async-ringbuffer = { git = "https://github.com/sbillig/async-ringbuffer", rev = "0eaab49" }
