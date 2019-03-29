@@ -67,11 +67,11 @@ async fn send<W: AsyncWrite + 'static>(mut w: W, msg: Packet) -> (W, Result<(), 
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Packet {
-    is_stream: IsStream,
-    is_end: IsEnd,
-    body_type: BodyType,
-    id: i32,
-    body: Vec<u8>,
+    pub is_stream: IsStream,
+    pub is_end: IsEnd,
+    pub body_type: BodyType,
+    pub id: i32,
+    pub body: Vec<u8>,
 }
 impl Packet {
     fn flags(&self) -> u8 {
@@ -118,6 +118,32 @@ async fn recv_move<R: AsyncRead + 'static>(mut r: R) -> (R, Result<Option<Packet
 
 type PinFut<O> = Pin<Box<dyn Future<Output=O> + 'static>>;
 
+/// # Examples
+/// ```rust
+/// #![feature(async_await, await_macro, futures_api)]
+///
+/// use futures::prelude::{SinkExt, StreamExt};
+/// use packetstream::*;
+///
+/// let p = Packet {
+///     is_stream: IsStream::Yes,
+///     is_end: IsEnd::No,
+///     body_type: BodyType::Binary,
+///     id: 12345,
+///     body: vec![1,2,3,4,5]
+/// };
+///
+/// let (writer, reader) = async_ringbuffer::ring_buffer(64);
+///
+/// let mut sink = PacketSink::new(writer);
+/// let mut stream = PacketStream::new(reader);
+/// async {
+///     await!(sink.send(p));
+///     let r = await!(stream.next()).unwrap().unwrap();
+///     assert_eq!(&r.body, &[1,2,3,4,5]);
+///     assert_eq!(r.id, 12345);
+/// };
+/// ```
 pub struct PacketStream<R> {
     reader: Option<R>,
     future: Option<PinFut<(R, Result<Option<Packet>, Error>)>>
