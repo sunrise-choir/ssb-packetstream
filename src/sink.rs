@@ -18,7 +18,7 @@ async fn send<W: AsyncWrite + 'static>(mut w: W, msg: Packet) -> (W, Result<(), 
 }
 
 
-enum SinkState<W> {
+enum State<W> {
     Ready,
     Sending(PinFut<(W, Result<(), Error>)>),
     Closing,
@@ -26,32 +26,32 @@ enum SinkState<W> {
 
 pub struct PacketSink<W> {
     writer: Option<W>,
-    state: SinkState<W>
+    state: State<W>
 }
 impl<W> PacketSink<W> {
     pub fn new(w: W) -> PacketSink<W> {
         PacketSink {
             writer: Some(w),
-            state: SinkState::Ready,
+            state: State::Ready,
         }
     }
 
     fn do_poll_flush(&mut self, wk: &Waker) -> Poll<Result<(), Error>> {
         match &mut self.state {
-            SinkState::Ready => Ready(Ok(())),
-            SinkState::Sending(ref mut f) => {
+            State::Ready => Ready(Ok(())),
+            State::Sending(ref mut f) => {
                 let p = Pin::as_mut(f);
 
                 match p.poll(wk) {
                     Pending => Pending,
                     Ready((w, res)) => {
                         self.writer = Some(w);
-                        self.state = SinkState::Ready;
+                        self.state = State::Ready;
                         Ready(res)
                     }
                 }
             },
-            SinkState::Closing => panic!() // TODO?
+            State::Closing => panic!() // TODO?
         }
     }
 }
@@ -68,7 +68,7 @@ where W: AsyncWrite + Unpin + 'static
 
     fn start_send(mut self: Pin<&mut Self>, item: Self::SinkItem) -> Result<(), Self::SinkError> {
         let w = self.writer.take().unwrap();
-        self.state = SinkState::Sending(Box::pin(send(w, item)));
+        self.state = State::Sending(Box::pin(send(w, item)));
         Ok(())
     }
 
@@ -78,18 +78,18 @@ where W: AsyncWrite + Unpin + 'static
 
     fn poll_close(mut self: Pin<&mut Self>, wk: &Waker) -> Poll<Result<(), Self::SinkError>> {
         match self.state {
-            SinkState::Ready => {
-                self.state = SinkState::Closing;
+            State::Ready => {
+                self.state = State::Closing;
                 self.poll_close(wk)
             },
-            SinkState::Sending(_) => match self.do_poll_flush(wk) {
+            State::Sending(_) => match self.do_poll_flush(wk) {
                 Pending => Pending,
                 Ready(_) => {
-                    self.state = SinkState::Closing;
+                    self.state = State::Closing;
                     self.poll_close(wk)
                 }
             },
-            SinkState::Closing => {
+            State::Closing => {
                 if let Some(ref mut w) = &mut self.writer {
                     w.poll_close(wk)
                 } else {
