@@ -45,11 +45,11 @@ enum State<W> {
 ///     assert_eq!(&buf, &[0b0000_1010, 0, 0, 0, 5, 0, 0, 0, 123, 1, 2, 3, 4, 5]);
 /// });
 /// ```
-pub struct PacketSink<W> {
+pub struct PacketSink<W: AsyncWrite> {
     writer: Option<W>,
     state: State<W>
 }
-impl<W> PacketSink<W> {
+impl<W: AsyncWrite> PacketSink<W> {
     pub fn new(w: W) -> PacketSink<W> {
         PacketSink {
             writer: Some(w),

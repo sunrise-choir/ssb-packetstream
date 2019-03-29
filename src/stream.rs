@@ -62,11 +62,11 @@ type PinFut<O> = Pin<Box<dyn Future<Output=O> + 'static>>;
 ///     assert_eq!(r.id, 12345);
 /// });
 /// ```
-pub struct PacketStream<R> {
+pub struct PacketStream<R: AsyncRead> {
     reader: Option<R>,
     future: Option<PinFut<(R, Result<Option<Packet>, Error>)>>
 }
-impl<R> PacketStream<R> {
+impl<R: AsyncRead> PacketStream<R> {
     pub fn new(r: R) -> PacketStream<R> {
         PacketStream {
             reader: Some(r),
