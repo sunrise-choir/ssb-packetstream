@@ -59,16 +59,23 @@ impl<W: AsyncWrite> PacketSink<W> {
 
     fn do_poll_flush(&mut self, wk: &Waker) -> Poll<Result<(), Error>> {
         match &mut self.state {
-            State::Ready => Ready(Ok(())),
+            State::Ready => {
+                if let Some(ref mut w) = &mut self.writer {
+                    w.poll_flush(wk)
+                } else {
+                    panic!()
+                }
+            },
             State::Sending(ref mut f) => {
                 let p = Pin::as_mut(f);
 
                 match p.poll(wk) {
                     Pending => Pending,
-                    Ready((w, res)) => {
+                    Ready((w, _res)) => {
+                        // TODO: check if 'res' is an error
                         self.writer = Some(w);
                         self.state = State::Ready;
-                        Ready(res)
+                        self.do_poll_flush(wk)
                     }
                 }
             },
