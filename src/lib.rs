@@ -8,6 +8,10 @@ pub use packet::*;
 pub use sink::*;
 pub use stream::*;
 
+use core::future::Future;
+use core::pin::Pin;
+
+type PinFut<O> = Pin<Box<dyn Future<Output=O> + 'static>>;
 
 #[cfg(test)]
 mod tests {
@@ -15,6 +19,7 @@ mod tests {
     use byteorder::{ByteOrder, BigEndian};
     use futures::executor::block_on;
     use futures::{stream::iter, join, SinkExt, StreamExt};
+    use futures::io::AsyncReadExt;
 
     #[test]
     fn encode() {
@@ -100,4 +105,70 @@ mod tests {
             assert_eq!(msg, &msgs_clone[i]);
         }
     }
+
+    #[test]
+    fn close() {
+        let (w, r) = async_ringbuffer::ring_buffer(64);
+
+        let mut sink = PacketSink::new(w);
+        let mut stream = PacketStream::new(r);
+
+        block_on(async {
+            await!(sink.send(Packet::new(IsStream::Yes,
+                                         IsEnd::No,
+                                         BodyType::Utf8,
+                                         10,
+                                         vec![1,2,3,4,5]))).unwrap();
+
+            let p = await!(stream.next()).unwrap().unwrap();
+            assert_eq!(p.is_stream, IsStream::Yes);
+            assert_eq!(p.is_end, IsEnd::No);
+            assert_eq!(p.body_type, BodyType::Utf8);
+            assert_eq!(p.id, 10);
+            assert_eq!(&p.body, &[1,2,3,4,5]);
+
+            await!(sink.close()).unwrap();
+
+            let w = sink.into_inner();
+            assert!(w.is_closed());
+
+            let p = await!(stream.next());
+            assert!(p.is_none());
+            assert!(stream.is_closed());
+        });
+    }
+
+    #[test]
+    fn goodbye() {
+        let (w, mut r) = async_ringbuffer::ring_buffer(64);
+
+        let mut sink = PacketSink::new(w);
+
+        block_on(async {
+            await!(sink.send(Packet::new(IsStream::Yes,
+                                         IsEnd::No,
+                                         BodyType::Utf8,
+                                         10,
+                                         vec![1,2,3,4,5]))).unwrap();
+
+            await!(sink.close()).unwrap();
+
+            let mut tmp = [0; 14];
+            let n = await!(r.read(&mut tmp)).unwrap();
+            assert_eq!(n, 14);
+
+            assert_eq!(&tmp, &[0b0000_1001, 0, 0, 0, 5, 0, 0, 0, 10,
+                               1, 2, 3, 4, 5]);
+
+            let mut head = [0; 9];
+            let n = await!(r.read(&mut head)).unwrap();
+            assert_eq!(n, 9);
+            // goodbye header is 9 zeros
+            assert_eq!(&head, &[0; 9]);
+
+            let n = await!(r.read(&mut head)).unwrap();
+            assert_eq!(n, 0);
+        });
+    }
+
 }

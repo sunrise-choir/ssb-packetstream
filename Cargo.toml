@@ -15,4 +15,4 @@ byteorder = "1"
 futures-preview = "0.3.0-alpha.13"
 
 [dev-dependencies]
-async-ringbuffer = { git = "https://github.com/sbillig/async-ringbuffer", rev = "0eaab49" }
+async-ringbuffer = { git = "https://github.com/sunrise-choir/async-ringbuffer", rev = "59d7d53" }

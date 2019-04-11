@@ -1,12 +1,10 @@
-use core::future::Future;
 use core::pin::Pin;
 use core::task::{Poll, Poll::Pending, Poll::Ready, Waker};
 use futures::io::{AsyncWrite, AsyncWriteExt, Error};
 use futures::sink::Sink;
 
+use crate::PinFut;
 use crate::packet::*;
-
-type PinFut<O> = Pin<Box<dyn Future<Output=O> + 'static>>;
 
 async fn send<W: AsyncWrite + 'static>(mut w: W, msg: Packet) -> (W, Result<(), Error>) {
     let h = msg.header();
@@ -17,10 +15,15 @@ async fn send<W: AsyncWrite + 'static>(mut w: W, msg: Packet) -> (W, Result<(), 
     (w, r.map(|_| ()))
 }
 
+async fn send_goodbye<W: AsyncWrite + 'static>(mut w: W) -> (W, Result<(), Error>) {
+    let r = await!(w.write_all(&[0; 9]));
+    (w, r.map(|_| ()))
+}
 
 enum State<W> {
     Ready,
     Sending(PinFut<(W, Result<(), Error>)>),
+    SendingGoodbye(PinFut<(W, Result<(), Error>)>),
     Closing,
 }
 
@@ -79,7 +82,7 @@ impl<W: AsyncWrite> PacketSink<W> {
                     }
                 }
             },
-            State::Closing => panic!() // TODO?
+            _ => panic!() // I guess?
         }
     }
 
@@ -109,16 +112,33 @@ where W: AsyncWrite + Unpin + 'static
     }
 
     fn poll_close(mut self: Pin<&mut Self>, wk: &Waker) -> Poll<Result<(), Self::SinkError>> {
-        match self.state {
+        match &mut self.state {
             State::Ready => {
-                self.state = State::Closing;
+                let w = self.writer.take().unwrap();
+                self.state = State::SendingGoodbye(Box::pin(send_goodbye(w)));
                 self.poll_close(wk)
             },
             State::Sending(_) => match self.do_poll_flush(wk) {
                 Pending => Pending,
                 Ready(_) => {
-                    self.state = State::Closing;
+                    self.state = State::Ready;
                     self.poll_close(wk)
+                }
+            },
+            State::SendingGoodbye(fut) => {
+                let p = Pin::as_mut(fut);
+
+                match p.poll(wk) {
+                    Ready((w, Ok(()))) => {
+                        self.writer = Some(w);
+                        self.state = State::Closing;
+                        self.poll_close(wk)
+                    },
+                    Ready((w, Err(e))) => {
+                        self.writer = Some(w);
+                        Ready(Err(e))
+                    },
+                    Pending => Pending,
                 }
             },
             State::Closing => {
