@@ -119,9 +119,7 @@ impl<R: AsyncRead + Unpin + 'static> Stream for PacketStream<R> {
                 self.poll_next(cx)
             },
             State::Waiting(mut f) => {
-                let p = Pin::as_mut(&mut f);
-
-                match p.poll(cx) {
+                match f.as_mut().poll(cx) {
                     Pending => {
                         self.state = State::Waiting(f);
                         Pending
