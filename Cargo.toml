@@ -12,7 +12,7 @@ keywords = ["packet-stream", "protocol", "ssb", "scuttlebutt"]
 
 [dependencies]
 byteorder = "1"
-futures-preview = "0.3.0-alpha.13"
+futures-preview = "0.3.0-alpha.14"
 
 [dev-dependencies]
-async-ringbuffer = { git = "https://github.com/sunrise-choir/async-ringbuffer", rev = "59d7d53" }
+async-ringbuffer = { git = "https://github.com/sunrise-choir/async-ringbuffer", rev = "0c599a5" }

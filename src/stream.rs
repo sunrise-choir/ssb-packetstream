@@ -1,5 +1,5 @@
 use core::pin::Pin;
-use core::task::{Poll, Poll::Pending, Poll::Ready, Waker};
+use core::task::{Context, Poll, Poll::Pending, Poll::Ready};
 use byteorder::{ByteOrder, BigEndian};
 use futures::io::{AsyncRead, AsyncReadExt};
 use futures::stream::Stream;
@@ -8,7 +8,9 @@ use std::io::{Error, ErrorKind};
 use crate::PinFut;
 use crate::packet::*;
 
-async fn recv<R: AsyncRead>(r: &mut R) -> Result<Option<Packet>, Error> {
+async fn recv<R>(r: &mut R) -> Result<Option<Packet>, Error>
+where R: AsyncRead + Unpin
+{
     let mut head = [0; 9];
     let n = await!(r.read(&mut head))?;
     if n == 0 {
@@ -36,7 +38,9 @@ async fn recv<R: AsyncRead>(r: &mut R) -> Result<Option<Packet>, Error> {
                         body)))
 }
 
-async fn recv_move<R: AsyncRead + 'static>(mut r: R) -> (R, Result<Option<Packet>, Error>) {
+async fn recv_move<R>(mut r: R) -> (R, Result<Option<Packet>, Error>)
+where R: AsyncRead + Unpin + 'static
+{
     let res = await!(recv(&mut r));
     (r, res)
 }
@@ -99,17 +103,17 @@ impl<R: AsyncRead> PacketStream<R> {
 impl<R: AsyncRead + Unpin + 'static> Stream for PacketStream<R> {
     type Item = Result<Packet, Error>;
 
-    fn poll_next(mut self: Pin<&mut Self>, wk: &Waker) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         match &mut self.state {
             State::Ready => {
                 let r = self.reader.take().unwrap();
                 self.state = State::Waiting(Box::pin(recv_move(r)));
-                self.poll_next(wk)
+                self.poll_next(cx)
             },
             State::Waiting(ref mut f) => {
                 let p = Pin::as_mut(f);
 
-                match p.poll(wk) {
+                match p.poll(cx) {
                     Pending => Pending,
                     Ready((r, Ok(None))) => {
                         self.reader = Some(r);
