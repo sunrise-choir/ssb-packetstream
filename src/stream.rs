@@ -4,6 +4,7 @@ use byteorder::{ByteOrder, BigEndian};
 use futures::io::{AsyncRead, AsyncReadExt};
 use futures::stream::Stream;
 use std::io::{Error, ErrorKind};
+use std::mem::replace;
 
 use crate::PinFut;
 use crate::packet::*;
@@ -46,9 +47,15 @@ where R: AsyncRead + Unpin + 'static
 }
 
 enum State<R> {
-    Ready,
+    Ready(R),
     Waiting(PinFut<(R, Result<Option<Packet>, Error>)>),
-    Closed,
+    Closed(R),
+    Invalid,
+}
+impl<R> State<R> {
+    fn take(&mut self) -> Self {
+        replace(self, State::Invalid)
+    }
 }
 
 /// # Examples
@@ -77,26 +84,28 @@ enum State<R> {
 /// });
 /// ```
 pub struct PacketStream<R: AsyncRead> {
-    reader: Option<R>,
     state: State<R>
 }
 impl<R: AsyncRead> PacketStream<R> {
     pub fn new(r: R) -> PacketStream<R> {
         PacketStream {
-            reader: Some(r),
-            state: State::Ready,
+            state: State::Ready(r),
         }
     }
 
     pub fn is_closed(&self) -> bool {
         match &self.state {
-            State::Closed => true,
+            State::Closed(_) => true,
             _ => false,
         }
     }
 
     pub fn into_inner(mut self) -> R {
-        self.reader.take().unwrap()
+        match self.state.take() {
+            State::Ready(r) => r,
+            State::Closed(r) => r,
+            _ => panic!(),
+        }
     }
 }
 
@@ -104,35 +113,35 @@ impl<R: AsyncRead + Unpin + 'static> Stream for PacketStream<R> {
     type Item = Result<Packet, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        match &mut self.state {
-            State::Ready => {
-                let r = self.reader.take().unwrap();
+        match self.state.take() {
+            State::Ready(r) => {
                 self.state = State::Waiting(Box::pin(recv_move(r)));
                 self.poll_next(cx)
             },
-            State::Waiting(ref mut f) => {
-                let p = Pin::as_mut(f);
+            State::Waiting(mut f) => {
+                let p = Pin::as_mut(&mut f);
 
                 match p.poll(cx) {
-                    Pending => Pending,
+                    Pending => {
+                        self.state = State::Waiting(f);
+                        Pending
+                    },
                     Ready((r, Ok(None))) => {
-                        self.reader = Some(r);
-                        self.state = State::Closed;
+                        self.state = State::Closed(r);
                         Ready(None)
                     },
                     Ready((r, Err(e))) => {
-                        self.reader = Some(r);
-                        self.state = State::Closed;
+                        self.state = State::Closed(r);
                         Ready(Some(Err(e)))
                     },
                     Ready((r, res)) => {
-                        self.reader = Some(r);
-                        self.state = State::Ready;
+                        self.state = State::Ready(r);
                         Ready(res.transpose())
                     }
                 }
             },
-            State::Closed => Ready(None),
+            State::Closed(_) => Ready(None),
+            State::Invalid => panic!(),
         }
     }
 }
