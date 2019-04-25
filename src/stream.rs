@@ -46,17 +46,6 @@ where R: AsyncRead + Unpin + 'static
     (r, res)
 }
 
-enum State<R> {
-    Ready(R),
-    Waiting(PinFut<(R, Result<Option<Packet>, Error>)>),
-    Closed(R),
-    Invalid,
-}
-impl<R> State<R> {
-    fn take(&mut self) -> Self {
-        replace(self, State::Invalid)
-    }
-}
 
 /// # Examples
 /// ```rust
@@ -102,10 +91,40 @@ impl<R: AsyncRead> PacketStream<R> {
 
     pub fn into_inner(mut self) -> R {
         match self.state.take() {
-            State::Ready(r) => r,
+            State::Ready(r) |
             State::Closed(r) => r,
             _ => panic!(),
         }
+    }
+}
+
+enum State<R> {
+    Ready(R),
+    Waiting(PinFut<(R, Result<Option<Packet>, Error>)>),
+    Closed(R),
+    Invalid,
+}
+impl<R> State<R> {
+    fn take(&mut self) -> Self {
+        replace(self, State::Invalid)
+    }
+}
+
+fn next<R>(state: State<R>, cx: &mut Context) -> (State<R>, Poll<Option<Result<Packet, Error>>>)
+where R: AsyncRead + Unpin + 'static
+{
+    match state {
+        State::Ready(r) => next(State::Waiting(Box::pin(recv_move(r))), cx),
+        State::Waiting(mut f) => {
+            match f.as_mut().poll(cx) {
+                Pending              => (State::Waiting(f), Pending),
+                Ready((r, Ok(None))) => (State::Closed(r),  Ready(None)),
+                Ready((r, Err(e)))   => (State::Closed(r),  Ready(Some(Err(e)))),
+                Ready((r, res))      => (State::Ready(r),   Ready(res.transpose())),
+            }
+        },
+        State::Closed(r) => (State::Closed(r), Ready(None)),
+        State::Invalid => panic!(),
     }
 }
 
@@ -113,33 +132,8 @@ impl<R: AsyncRead + Unpin + 'static> Stream for PacketStream<R> {
     type Item = Result<Packet, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        match self.state.take() {
-            State::Ready(r) => {
-                self.state = State::Waiting(Box::pin(recv_move(r)));
-                self.poll_next(cx)
-            },
-            State::Waiting(mut f) => {
-                match f.as_mut().poll(cx) {
-                    Pending => {
-                        self.state = State::Waiting(f);
-                        Pending
-                    },
-                    Ready((r, Ok(None))) => {
-                        self.state = State::Closed(r);
-                        Ready(None)
-                    },
-                    Ready((r, Err(e))) => {
-                        self.state = State::Closed(r);
-                        Ready(Some(Err(e)))
-                    },
-                    Ready((r, res)) => {
-                        self.state = State::Ready(r);
-                        Ready(res.transpose())
-                    }
-                }
-            },
-            State::Closed(_) => Ready(None),
-            State::Invalid => panic!(),
-        }
+        let (state, poll) = next(self.state.take(), cx);
+        self.state = state;
+        poll
     }
 }

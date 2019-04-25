@@ -25,21 +25,6 @@ where W: AsyncWrite + Unpin + 'static
     (w, r.map(|_| ()))
 }
 
-enum State<W> {
-    Ready(W),
-    Sending(PinFut<(W, Result<(), Error>)>),
-    SendingGoodbye(PinFut<(W, Result<(), Error>)>),
-    Closing(W),
-    Failed(W),
-    Invalid,
-}
-impl<W> State<W> {
-    fn take(&mut self) -> Self {
-        replace(self, State::Invalid)
-    }
-}
-
-
 /// #Examples
 /// ```rust
 /// #![feature(async_await, await_macro, futures_api)]
@@ -75,13 +60,85 @@ where W: AsyncWrite + Unpin
 
     pub fn into_inner(mut self) -> W {
         match self.state.take() {
-            State::Ready(w) => w,
-            State::Closing(w) => w,
-            State::Failed(w) => w,
+            State::Ready(w)      |
+            State::Closing(w, _) |
+            State::Closed(w) => w,
             _ => panic!(),
         }
     }
 }
+
+enum State<W> {
+    Ready(W),
+    Sending(PinFut<(W, Result<(), Error>)>),
+    SendingGoodbye(PinFut<(W, Result<(), Error>)>),
+    Closing(W, Option<Error>),
+    Closed(W),
+    Invalid,
+}
+impl<W> State<W> {
+    fn take(&mut self) -> Self {
+        replace(self, State::Invalid)
+    }
+}
+
+fn flush<W>(state: State<W>, cx: &mut Context) -> (State<W>, Poll<Result<(), Error>>)
+where W: AsyncWrite + Unpin + 'static
+{
+    match state {
+        State::Ready(mut w) => {
+            let p = Pin::new(&mut w).poll_flush(cx);
+            (State::Ready(w), p)
+        },
+        State::Sending(mut f) => {
+            match f.as_mut().poll(cx) {
+                Pending            => (State::Sending(f), Pending),
+                Ready((w, Err(e))) => close(State::Closing(w, Some(e)), cx),
+                Ready((mut w, Ok(()))) => {
+                    let p = Pin::new(&mut w).poll_flush(cx);
+                    (State::Ready(w), p)
+                },
+            }
+        },
+        _ => panic!() // TODO: can poll_flush be called after poll_close()?
+    }
+}
+
+fn close<W>(state: State<W>, cx: &mut Context) -> (State<W>, Poll<Result<(), Error>>)
+where W: AsyncWrite + Unpin + 'static
+{
+    match state {
+        State::Ready(w) => close(State::SendingGoodbye(Box::pin(send_goodbye(w))), cx),
+        State::Sending(mut f) => {
+            match f.as_mut().poll(cx) {
+                Pending            => (State::Sending(f), Pending),
+                Ready((w, Ok(()))) => close(State::SendingGoodbye(Box::pin(send_goodbye(w))), cx),
+                Ready((w, Err(e))) => close(State::Closing(w, Some(e)), cx),
+            }
+        },
+        State::SendingGoodbye(mut f) => {
+            match f.as_mut().poll(cx) {
+                Pending            => (State::SendingGoodbye(f), Pending),
+                Ready((w, Err(e))) => close(State::Closing(w, Some(e)), cx),
+                Ready((mut w, Ok(()))) => {
+                    let p = Pin::new(&mut w).poll_close(cx);
+                    (State::Closing(w, None), p)
+                },
+            }
+        },
+        State::Closing(mut w, e) => {
+            match (Pin::new(&mut w).poll_close(cx), e) {
+                (Pending, e)        => (State::Closing(w, e), Pending),
+                (Ready(r), None)    => (State::Closed(w), Ready(r)),
+                (Ready(_), Some(e)) => (State::Closed(w), Ready(Err(e))), // Combine errors if this fails?
+            }
+        },
+
+        st @ State::Closed(_) => (st, Ready(Ok(()))),
+        _ => panic!(),
+    }
+}
+
 
 impl<W> Sink<Packet> for PacketSink<W>
 where W: AsyncWrite + Unpin + 'static
@@ -103,78 +160,14 @@ where W: AsyncWrite + Unpin + 'static
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::SinkError>> {
-        match self.state.take() {
-            State::Ready(mut w) => {
-                let p = Pin::new(&mut w).poll_flush(cx);
-                self.state = State::Ready(w);
-                p
-            },
-            State::Sending(mut f) => {
-                match f.as_mut().poll(cx) {
-                    Pending => {
-                        self.state = State::Sending(f);
-                        Pending
-                    },
-                    Ready((mut w, Ok(()))) => {
-                        let p = Pin::new(&mut w).poll_flush(cx);
-                        self.state = State::Ready(w);
-                        p
-                    },
-                    Ready((w, Err(e))) => {
-                        self.state = State::Failed(w);
-                        Ready(Err(e))
-                    },
-                }
-            },
-            _ => panic!() // TODO: can poll_flush be called after poll_close()?
-        }
+        let (state, poll) = flush(self.state.take(), cx);
+        self.state = state;
+        poll
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::SinkError>> {
-        match self.state.take() {
-            State::Ready(w) => {
-                self.state = State::SendingGoodbye(Box::pin(send_goodbye(w)));
-                self.poll_close(cx)
-            },
-            State::Sending(mut f) => {
-                match f.as_mut().poll(cx) {
-                    Pending => {
-                        self.state = State::Sending(f);
-                        Pending
-                    },
-                    Ready((w, Ok(()))) => {
-                        self.state = State::SendingGoodbye(Box::pin(send_goodbye(w)));
-                        self.poll_close(cx)
-                    },
-                    Ready((w, Err(e))) => {
-                        self.state = State::Failed(w);
-                        Ready(Err(e))
-                    },
-                }
-            },
-            State::SendingGoodbye(mut f) => {
-                match f.as_mut().poll(cx) {
-                    Pending => {
-                        self.state = State::SendingGoodbye(f);
-                        Pending
-                    },
-                    Ready((mut w, Ok(()))) => {
-                        let p = Pin::new(&mut w).poll_close(cx);
-                        self.state = State::Closing(w);
-                        p
-                    },
-                    Ready((w, Err(e))) => {
-                        self.state = State::Failed(w);
-                        Ready(Err(e))
-                    },
-                }
-            },
-            State::Closing(mut w) => {
-                let p = Pin::new(&mut w).poll_close(cx);
-                self.state = State::Closing(w);
-                p
-            },
-            _ => panic!(),
-        }
+        let (state, poll) = close(self.state.take(), cx);
+        self.state = state;
+        poll
     }
 }
