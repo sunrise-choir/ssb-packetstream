@@ -3,7 +3,7 @@
 [![Documentation](https://docs.rs/packetstream/badge.svg)](https://docs.rs/packetstream)
 
 ```rust
-#![feature(async_await, await_macro, futures_api)]
+#![feature(async_await)]
 
 use futures::prelude::{SinkExt, StreamExt};
 use packetstream::*;
@@ -22,8 +22,8 @@ let mut sink = PacketSink::new(writer);
 let mut stream = PacketStream::new(reader);
 
 async {
-    await!(sink.send(p));
-    let r = await!(stream.next()).unwrap().unwrap();
+    sink.send(p).await;
+    let r = stream.next().await.unwrap().unwrap();
     assert_eq!(&r.body, &[1,2,3,4,5]);
     assert_eq!(r.id, 12345);
 };

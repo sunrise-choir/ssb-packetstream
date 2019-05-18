@@ -1,4 +1,4 @@
-#![feature(async_await, await_macro, futures_api)]
+#![feature(async_await)]
 
 mod packet;
 mod sink;
@@ -18,8 +18,8 @@ mod tests {
     use super::*;
     use byteorder::{ByteOrder, BigEndian};
     use futures::executor::block_on;
-    use futures::{stream::iter, join, SinkExt, StreamExt};
     use futures::io::AsyncReadExt;
+    use futures::{future::join, stream::iter, SinkExt, StreamExt};
 
     #[test]
     fn encode() {
@@ -90,16 +90,22 @@ mod tests {
 
         let send = async {
             let mut items = iter(msgs);
-            await!(sink.send_all(&mut items)).unwrap();
-            await!(sink.close()).unwrap();
+            sink.send_all(&mut items).await.unwrap();
+            sink.close().await.unwrap();
         };
 
         let recv = async {
-            let r: Vec<Packet> = await!(stream.map(|r| { dbg!(&r); r.unwrap() }).collect());
+            let r: Vec<Packet> = stream
+                .map(|r| {
+                    dbg!(&r);
+                    r.unwrap()
+                })
+                .collect()
+                .await;
             r
         };
 
-        let (_, received) = block_on(async { join!(send, recv) });
+        let (_, received) = block_on(async { join(send, recv).await });
 
         for (i, msg) in received.iter().enumerate() {
             assert_eq!(msg, &msgs_clone[i]);
@@ -114,25 +120,25 @@ mod tests {
         let mut stream = PacketStream::new(r);
 
         block_on(async {
-            await!(sink.send(Packet::new(IsStream::Yes,
-                                         IsEnd::No,
-                                         BodyType::Utf8,
-                                         10,
-                                         vec![1,2,3,4,5]))).unwrap();
+            sink.send(Packet::new(IsStream::Yes,
+                                  IsEnd::No,
+                                  BodyType::Utf8,
+                                  10,
+                                  vec![1,2,3,4,5])).await.unwrap();
 
-            let p = await!(stream.next()).unwrap().unwrap();
+            let p = stream.next().await.unwrap().unwrap();
             assert_eq!(p.is_stream, IsStream::Yes);
             assert_eq!(p.is_end, IsEnd::No);
             assert_eq!(p.body_type, BodyType::Utf8);
             assert_eq!(p.id, 10);
             assert_eq!(&p.body, &[1,2,3,4,5]);
 
-            await!(sink.close()).unwrap();
+            sink.close().await.unwrap();
 
             let w = sink.into_inner();
             assert!(w.is_closed());
 
-            let p = await!(stream.next());
+            let p = stream.next().await;
             assert!(p.is_none());
             assert!(stream.is_closed());
         });
@@ -145,28 +151,28 @@ mod tests {
         let mut sink = PacketSink::new(w);
 
         block_on(async {
-            await!(sink.send(Packet::new(IsStream::Yes,
-                                         IsEnd::No,
-                                         BodyType::Utf8,
-                                         10,
-                                         vec![1,2,3,4,5]))).unwrap();
+            sink.send(Packet::new(IsStream::Yes,
+                                  IsEnd::No,
+                                  BodyType::Utf8,
+                                  10,
+                                  vec![1,2,3,4,5])).await.unwrap();
 
-            await!(sink.close()).unwrap();
+            sink.close().await.unwrap();
 
             let mut tmp = [0; 14];
-            let n = await!(r.read(&mut tmp)).unwrap();
+            let n = r.read(&mut tmp).await.unwrap();
             assert_eq!(n, 14);
 
             assert_eq!(&tmp, &[0b0000_1001, 0, 0, 0, 5, 0, 0, 0, 10,
                                1, 2, 3, 4, 5]);
 
             let mut head = [0; 9];
-            let n = await!(r.read(&mut head)).unwrap();
+            let n = r.read(&mut head).await.unwrap();
             assert_eq!(n, 9);
             // goodbye header is 9 zeros
             assert_eq!(&head, &[0; 9]);
 
-            let n = await!(r.read(&mut head)).unwrap();
+            let n = r.read(&mut head).await.unwrap();
             assert_eq!(n, 0);
         });
     }

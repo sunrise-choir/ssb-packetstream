@@ -11,9 +11,9 @@ async fn send<W>(mut w: W, msg: Packet) -> (W, Result<(), Error>)
 where W: AsyncWrite + Unpin + 'static
 {
     let h = msg.header();
-    let mut r = await!(w.write_all(&h));
+    let mut r = w.write_all(&h).await;
     if r.is_ok() {
-        r = await!(w.write_all(&msg.body));
+        r = w.write_all(&msg.body).await;
     }
     (w, r.map(|_| ()))
 }
@@ -21,13 +21,13 @@ where W: AsyncWrite + Unpin + 'static
 async fn send_goodbye<W>(mut w: W) -> (W, Result<(), Error>)
 where W: AsyncWrite + Unpin + 'static
 {
-    let r = await!(w.write_all(&[0; 9]));
+    let r = w.write_all(&[0; 9]).await;
     (w, r.map(|_| ()))
 }
 
 /// #Examples
 /// ```rust
-/// #![feature(async_await, await_macro, futures_api)]
+/// #![feature(async_await)]
 ///
 /// use std::io::Cursor;
 /// use futures::executor::block_on;
@@ -36,12 +36,12 @@ where W: AsyncWrite + Unpin + 'static
 ///
 /// let mut sink = PacketSink::new(Cursor::new(vec![0; 14]));
 /// block_on(async {
-///     await!(sink.send(Packet::new(IsStream::Yes,
+///     sink.send(Packet::new(IsStream::Yes,
 ///                                  IsEnd::No,
 ///                                  BodyType::Json,
 ///                                  123,
-///                                  vec![1,2,3,4,5])));
-///     await!(sink.close());
+///                                  vec![1,2,3,4,5])).await;
+///     sink.close().await;
 ///     let buf = sink.into_inner().into_inner();
 ///     assert_eq!(&buf, &[0b0000_1010, 0, 0, 0, 5, 0, 0, 0, 123, 1, 2, 3, 4, 5]);
 /// });

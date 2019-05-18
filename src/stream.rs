@@ -13,13 +13,13 @@ async fn recv<R>(r: &mut R) -> Result<Option<Packet>, Error>
 where R: AsyncRead + Unpin
 {
     let mut head = [0; 9];
-    let n = await!(r.read(&mut head))?;
+    let n = r.read(&mut head).await?;
     if n == 0 {
         return Err(Error::new(ErrorKind::UnexpectedEof,
                               "PacketStream underlying reader closed without goodbye"));
     }
     if n < head.len() {
-        await!(r.read_exact(&mut head[n..]))?;
+        r.read_exact(&mut head[n..]).await?;
     }
 
     if &head == &[0u8; 9] {
@@ -30,7 +30,7 @@ where R: AsyncRead + Unpin
     let id = BigEndian::read_i32(&head[5..]);
 
     let mut body = vec![0; body_len as usize];
-    await!(r.read_exact(&mut body))?;
+    r.read_exact(&mut body).await?;
 
     Ok(Some(Packet::new(head[0].into(),
                         head[0].into(),
@@ -42,14 +42,14 @@ where R: AsyncRead + Unpin
 async fn recv_move<R>(mut r: R) -> (R, Result<Option<Packet>, Error>)
 where R: AsyncRead + Unpin + 'static
 {
-    let res = await!(recv(&mut r));
+    let res = recv(&mut r).await;
     (r, res)
 }
 
 
 /// # Examples
 /// ```rust
-/// #![feature(async_await, await_macro, futures_api)]
+/// #![feature(async_await)]
 ///
 /// use futures::executor::block_on;
 /// use futures::prelude::{SinkExt, StreamExt};
@@ -66,8 +66,8 @@ where R: AsyncRead + Unpin + 'static
 /// let mut sink = PacketSink::new(writer);
 /// let mut stream = PacketStream::new(reader);
 /// block_on(async {
-///     await!(sink.send(p));
-///     let r = await!(stream.next()).unwrap().unwrap();
+///     sink.send(p).await;
+///     let r = stream.next().await.unwrap().unwrap();
 ///     assert_eq!(&r.body, &[1,2,3,4,5]);
 ///     assert_eq!(r.id, 12345);
 /// });
