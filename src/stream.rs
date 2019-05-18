@@ -25,7 +25,7 @@ where
         r.read_exact(&mut head[n..]).await?;
     }
 
-    if &head == &[0u8; 9] {
+    if head == [0u8; 9] {
         return Ok(None); // RPC goodbye
     }
 
