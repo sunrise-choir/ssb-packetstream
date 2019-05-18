@@ -1,4 +1,4 @@
-use byteorder::{ByteOrder, BigEndian};
+use byteorder::{BigEndian, ByteOrder};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Packet {
@@ -9,17 +9,19 @@ pub struct Packet {
     pub body: Vec<u8>,
 }
 impl Packet {
-    pub fn new(is_stream: IsStream,
-               is_end: IsEnd,
-               body_type: BodyType,
-               id: i32,
-               body: Vec<u8>) -> Packet {
+    pub fn new(
+        is_stream: IsStream,
+        is_end: IsEnd,
+        body_type: BodyType,
+        id: i32,
+        body: Vec<u8>,
+    ) -> Packet {
         Packet {
             is_stream,
             is_end,
             body_type,
             id,
-            body
+            body,
         }
     }
 
@@ -38,14 +40,14 @@ impl Packet {
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum IsStream {
-    No  = 0,
+    No = 0,
     Yes = 0b0000_1000,
 }
 impl From<u8> for IsStream {
     fn from(u: u8) -> IsStream {
         match u & IsStream::Yes as u8 {
             0 => IsStream::No,
-            _ => IsStream::Yes
+            _ => IsStream::Yes,
         }
     }
 }
@@ -53,14 +55,14 @@ impl From<u8> for IsStream {
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum IsEnd {
-    No  = 0,
+    No = 0,
     Yes = 0b0000_0100,
 }
 impl From<u8> for IsEnd {
     fn from(u: u8) -> IsEnd {
         match u & IsEnd::Yes as u8 {
             0 => IsEnd::No,
-            _ => IsEnd::Yes
+            _ => IsEnd::Yes,
         }
     }
 }

@@ -1,22 +1,25 @@
+use byteorder::{BigEndian, ByteOrder};
 use core::pin::Pin;
 use core::task::{Context, Poll, Poll::Pending, Poll::Ready};
-use byteorder::{ByteOrder, BigEndian};
 use futures::io::{AsyncRead, AsyncReadExt};
 use futures::stream::Stream;
 use std::io::{Error, ErrorKind};
 use std::mem::replace;
 
-use crate::PinFut;
 use crate::packet::*;
+use crate::PinFut;
 
 async fn recv<R>(r: &mut R) -> Result<Option<Packet>, Error>
-where R: AsyncRead + Unpin
+where
+    R: AsyncRead + Unpin,
 {
     let mut head = [0; 9];
     let n = r.read(&mut head).await?;
     if n == 0 {
-        return Err(Error::new(ErrorKind::UnexpectedEof,
-                              "PacketStream underlying reader closed without goodbye"));
+        return Err(Error::new(
+            ErrorKind::UnexpectedEof,
+            "PacketStream underlying reader closed without goodbye",
+        ));
     }
     if n < head.len() {
         r.read_exact(&mut head[n..]).await?;
@@ -32,20 +35,22 @@ where R: AsyncRead + Unpin
     let mut body = vec![0; body_len as usize];
     r.read_exact(&mut body).await?;
 
-    Ok(Some(Packet::new(head[0].into(),
-                        head[0].into(),
-                        head[0].into(),
-                        id,
-                        body)))
+    Ok(Some(Packet::new(
+        head[0].into(),
+        head[0].into(),
+        head[0].into(),
+        id,
+        body,
+    )))
 }
 
 async fn recv_move<R>(mut r: R) -> (R, Result<Option<Packet>, Error>)
-where R: AsyncRead + Unpin + 'static
+where
+    R: AsyncRead + Unpin + 'static,
 {
     let res = recv(&mut r).await;
     (r, res)
 }
-
 
 /// # Examples
 /// ```rust
@@ -73,7 +78,7 @@ where R: AsyncRead + Unpin + 'static
 /// });
 /// ```
 pub struct PacketStream<R: AsyncRead> {
-    state: State<R>
+    state: State<R>,
 }
 impl<R: AsyncRead> PacketStream<R> {
     pub fn new(r: R) -> PacketStream<R> {
@@ -91,8 +96,7 @@ impl<R: AsyncRead> PacketStream<R> {
 
     pub fn into_inner(mut self) -> R {
         match self.state.take() {
-            State::Ready(r) |
-            State::Closed(r) => r,
+            State::Ready(r) | State::Closed(r) => r,
             _ => panic!(),
         }
     }
@@ -111,17 +115,16 @@ impl<R> State<R> {
 }
 
 fn next<R>(state: State<R>, cx: &mut Context) -> (State<R>, Poll<Option<Result<Packet, Error>>>)
-where R: AsyncRead + Unpin + 'static
+where
+    R: AsyncRead + Unpin + 'static,
 {
     match state {
         State::Ready(r) => next(State::Waiting(Box::pin(recv_move(r))), cx),
-        State::Waiting(mut f) => {
-            match f.as_mut().poll(cx) {
-                Pending              => (State::Waiting(f), Pending),
-                Ready((r, Ok(None))) => (State::Closed(r),  Ready(None)),
-                Ready((r, Err(e)))   => (State::Closed(r),  Ready(Some(Err(e)))),
-                Ready((r, res))      => (State::Ready(r),   Ready(res.transpose())),
-            }
+        State::Waiting(mut f) => match f.as_mut().poll(cx) {
+            Pending => (State::Waiting(f), Pending),
+            Ready((r, Ok(None))) => (State::Closed(r), Ready(None)),
+            Ready((r, Err(e))) => (State::Closed(r), Ready(Some(Err(e)))),
+            Ready((r, res)) => (State::Ready(r), Ready(res.transpose())),
         },
         State::Closed(r) => (State::Closed(r), Ready(None)),
         State::Invalid => panic!(),

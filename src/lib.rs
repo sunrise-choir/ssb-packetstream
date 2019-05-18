@@ -11,23 +11,19 @@ pub use stream::*;
 use core::future::Future;
 use core::pin::Pin;
 
-type PinFut<O> = Pin<Box<dyn Future<Output=O> + 'static>>;
+type PinFut<O> = Pin<Box<dyn Future<Output = O> + 'static>>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use byteorder::{ByteOrder, BigEndian};
+    use byteorder::{BigEndian, ByteOrder};
     use futures::executor::block_on;
     use futures::io::AsyncReadExt;
     use futures::{future::join, stream::iter, SinkExt, StreamExt};
 
     #[test]
     fn encode() {
-        let mut p = Packet::new(IsStream::Yes,
-                                IsEnd::No,
-                                BodyType::Json,
-                                123,
-                                vec![0; 25]);
+        let mut p = Packet::new(IsStream::Yes, IsEnd::No, BodyType::Json, 123, vec![0; 25]);
 
         let expected_head: [u8; 9] = [0b0000_1010, 0, 0, 0, 25, 0, 0, 0, 123];
         assert_eq!(p.flags(), expected_head[0]);
@@ -41,7 +37,6 @@ mod tests {
 
     #[test]
     fn decode() {
-
         let head: [u8; 9] = [0b0000_1101, 0, 0, 0, 25, 0, 0, 0, 200];
         let body_len = BigEndian::read_u32(&head[1..5]);
         let id = BigEndian::read_i32(&head[5..]);
@@ -49,36 +44,41 @@ mod tests {
         assert_eq!(body_len, 25);
         assert_eq!(id, 200);
 
-        let p = Packet::new(head[0].into(),
-                            head[0].into(),
-                            head[0].into(),
-                            id,
-                            vec![0; body_len as usize]);
+        let p = Packet::new(
+            head[0].into(),
+            head[0].into(),
+            head[0].into(),
+            id,
+            vec![0; body_len as usize],
+        );
 
         assert_eq!(p.header(), head);
     }
 
-
     #[test]
     fn sink_stream() {
         let msgs = vec![
-            Packet::new(IsStream::Yes,
-                        IsEnd::No,
-                        BodyType::Binary,
-                        10,
-                        vec![1,2,3,4,5]),
-
-            Packet::new(IsStream::No,
-                        IsEnd::Yes,
-                        BodyType::Utf8,
-                        2002,
-                        (0..50).collect()),
-
-            Packet::new(IsStream::Yes,
-                        IsEnd::Yes,
-                        BodyType::Json,
-                        12345,
-                        (0..100).collect())
+            Packet::new(
+                IsStream::Yes,
+                IsEnd::No,
+                BodyType::Binary,
+                10,
+                vec![1, 2, 3, 4, 5],
+            ),
+            Packet::new(
+                IsStream::No,
+                IsEnd::Yes,
+                BodyType::Utf8,
+                2002,
+                (0..50).collect(),
+            ),
+            Packet::new(
+                IsStream::Yes,
+                IsEnd::Yes,
+                BodyType::Json,
+                12345,
+                (0..100).collect(),
+            ),
         ];
 
         let msgs_clone = msgs.clone();
@@ -120,18 +120,22 @@ mod tests {
         let mut stream = PacketStream::new(r);
 
         block_on(async {
-            sink.send(Packet::new(IsStream::Yes,
-                                  IsEnd::No,
-                                  BodyType::Utf8,
-                                  10,
-                                  vec![1,2,3,4,5])).await.unwrap();
+            sink.send(Packet::new(
+                IsStream::Yes,
+                IsEnd::No,
+                BodyType::Utf8,
+                10,
+                vec![1, 2, 3, 4, 5],
+            ))
+            .await
+            .unwrap();
 
             let p = stream.next().await.unwrap().unwrap();
             assert_eq!(p.is_stream, IsStream::Yes);
             assert_eq!(p.is_end, IsEnd::No);
             assert_eq!(p.body_type, BodyType::Utf8);
             assert_eq!(p.id, 10);
-            assert_eq!(&p.body, &[1,2,3,4,5]);
+            assert_eq!(&p.body, &[1, 2, 3, 4, 5]);
 
             sink.close().await.unwrap();
 
@@ -151,11 +155,15 @@ mod tests {
         let mut sink = PacketSink::new(w);
 
         block_on(async {
-            sink.send(Packet::new(IsStream::Yes,
-                                  IsEnd::No,
-                                  BodyType::Utf8,
-                                  10,
-                                  vec![1,2,3,4,5])).await.unwrap();
+            sink.send(Packet::new(
+                IsStream::Yes,
+                IsEnd::No,
+                BodyType::Utf8,
+                10,
+                vec![1, 2, 3, 4, 5],
+            ))
+            .await
+            .unwrap();
 
             sink.close().await.unwrap();
 
@@ -163,8 +171,7 @@ mod tests {
             let n = r.read(&mut tmp).await.unwrap();
             assert_eq!(n, 14);
 
-            assert_eq!(&tmp, &[0b0000_1001, 0, 0, 0, 5, 0, 0, 0, 10,
-                               1, 2, 3, 4, 5]);
+            assert_eq!(&tmp, &[0b0000_1001, 0, 0, 0, 5, 0, 0, 0, 10, 1, 2, 3, 4, 5]);
 
             let mut head = [0; 9];
             let n = r.read(&mut head).await.unwrap();
