@@ -34,7 +34,7 @@ where
 /// use std::io::Cursor;
 /// use futures::executor::block_on;
 /// use futures::prelude::SinkExt;
-/// use packetstream::*;
+/// use ssb_packetstream::*;
 ///
 /// let mut sink = PacketSink::new(Cursor::new(vec![0; 14]));
 /// block_on(async {

@@ -58,7 +58,7 @@ where
 ///
 /// use futures::executor::block_on;
 /// use futures::prelude::{SinkExt, StreamExt};
-/// use packetstream::*;
+/// use ssb_packetstream::*;
 ///
 /// let p = Packet::new(IsStream::Yes,
 ///                     IsEnd::No,

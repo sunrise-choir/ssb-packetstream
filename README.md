@@ -1,6 +1,6 @@
 # Packet Stream
 
-[![Documentation](https://docs.rs/packetstream/badge.svg)](https://docs.rs/packetstream)
+[![Documentation](https://docs.rs/ssb-packetstream/badge.svg)](https://docs.rs/ssb-packetstream) [![Build Status](https://travis-ci.org/sunrise-choir/ssb-packetstream.svg?branch=master)](https://travis-ci.org/sunrise-choir/ssb-packetstream)
 
 ```rust
 #![feature(async_await)]
