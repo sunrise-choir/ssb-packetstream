@@ -2,6 +2,8 @@
 
 [![Documentation](https://docs.rs/ssb-packetstream/badge.svg)](https://docs.rs/ssb-packetstream) [![Build Status](https://travis-ci.org/sunrise-choir/ssb-packetstream.svg?branch=master)](https://travis-ci.org/sunrise-choir/ssb-packetstream)
 
+An implementation of the [packet-stream protocol](https://ssbc.github.io/scuttlebutt-protocol-guide/index.html#rpc-protocol) used by Secure Scuttlebutt.
+
 ```rust
 #![feature(async_await)]
 
