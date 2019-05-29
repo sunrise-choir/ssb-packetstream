@@ -77,10 +77,10 @@ where
 ///     assert_eq!(r.id, 12345);
 /// });
 /// ```
-pub struct PacketStream<R: AsyncRead> {
+pub struct PacketStream<R> {
     state: State<R>,
 }
-impl<R: AsyncRead> PacketStream<R> {
+impl<R> PacketStream<R> {
     pub fn new(r: R) -> PacketStream<R> {
         PacketStream {
             state: State::Ready(r),

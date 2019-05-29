@@ -48,13 +48,10 @@ where
 ///     assert_eq!(&buf, &[0b0000_1010, 0, 0, 0, 5, 0, 0, 0, 123, 1, 2, 3, 4, 5]);
 /// });
 /// ```
-pub struct PacketSink<W: AsyncWrite> {
+pub struct PacketSink<W> {
     state: State<W>,
 }
-impl<W> PacketSink<W>
-where
-    W: AsyncWrite + Unpin,
-{
+impl<W> PacketSink<W> {
     pub fn new(w: W) -> PacketSink<W> {
         PacketSink {
             state: State::Ready(w),
