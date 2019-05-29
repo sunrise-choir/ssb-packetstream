@@ -2,7 +2,7 @@ use byteorder::{BigEndian, ByteOrder};
 use core::pin::Pin;
 use core::task::{Context, Poll, Poll::Pending, Poll::Ready};
 use futures::io::{AsyncRead, AsyncReadExt};
-use futures::stream::Stream;
+use futures::stream::TryStream;
 use std::io::{Error, ErrorKind};
 use std::mem::replace;
 
@@ -57,7 +57,7 @@ where
 /// #![feature(async_await)]
 ///
 /// use futures::executor::block_on;
-/// use futures::prelude::{SinkExt, StreamExt};
+/// use futures::prelude::{SinkExt, TryStreamExt};
 /// use ssb_packetstream::*;
 ///
 /// let p = Packet::new(IsStream::Yes,
@@ -72,7 +72,7 @@ where
 /// let mut stream = PacketStream::new(reader);
 /// block_on(async {
 ///     sink.send(p).await;
-///     let r = stream.next().await.unwrap().unwrap();
+///     let r = stream.try_next().await.unwrap().unwrap();
 ///     assert_eq!(&r.body, &[1,2,3,4,5]);
 ///     assert_eq!(r.id, 12345);
 /// });
@@ -131,10 +131,11 @@ where
     }
 }
 
-impl<R: AsyncRead + Unpin + 'static> Stream for PacketStream<R> {
-    type Item = Result<Packet, Error>;
+impl<R: AsyncRead + Unpin + 'static> TryStream for PacketStream<R> {
+    type Ok = Packet;
+    type Error = Error;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+    fn try_poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Result<Self::Ok, Self::Error>>> {
         let (state, poll) = next(self.state.take(), cx);
         self.state = state;
         poll

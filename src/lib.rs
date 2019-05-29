@@ -19,7 +19,7 @@ mod tests {
     use byteorder::{BigEndian, ByteOrder};
     use futures::executor::block_on;
     use futures::io::AsyncReadExt;
-    use futures::{future::join, stream::iter, SinkExt, StreamExt};
+    use futures::{future::join, stream::iter, SinkExt, TryStreamExt};
 
     #[test]
     fn encode() {
@@ -96,12 +96,8 @@ mod tests {
 
         let recv = async {
             let r: Vec<Packet> = stream
-                .map(|r| {
-                    dbg!(&r);
-                    r.unwrap()
-                })
-                .collect()
-                .await;
+                .try_collect()
+                .await.unwrap();
             r
         };
 
@@ -130,7 +126,7 @@ mod tests {
             .await
             .unwrap();
 
-            let p = stream.next().await.unwrap().unwrap();
+            let p = stream.try_next().await.unwrap().unwrap();
             assert_eq!(p.is_stream, IsStream::Yes);
             assert_eq!(p.is_end, IsEnd::No);
             assert_eq!(p.body_type, BodyType::Utf8);
@@ -142,7 +138,7 @@ mod tests {
             let w = sink.into_inner();
             assert!(w.is_closed());
 
-            let p = stream.next().await;
+            let p = stream.try_next().await.unwrap();
             assert!(p.is_none());
             assert!(stream.is_closed());
         });
