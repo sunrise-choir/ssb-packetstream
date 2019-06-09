@@ -2,31 +2,39 @@ use byteorder::{BigEndian, ByteOrder};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Packet {
-    pub is_stream: IsStream,
-    pub is_end: IsEnd,
+    pub stream: IsStream,
+    pub end: IsEnd,
     pub body_type: BodyType,
     pub id: i32,
     pub body: Vec<u8>,
 }
 impl Packet {
     pub fn new(
-        is_stream: IsStream,
-        is_end: IsEnd,
+        stream: IsStream,
+        end: IsEnd,
         body_type: BodyType,
         id: i32,
         body: Vec<u8>,
     ) -> Packet {
         Packet {
-            is_stream,
-            is_end,
+            stream,
+            end,
             body_type,
             id,
             body,
         }
     }
 
+    pub fn is_stream(&self) -> bool {
+        self.stream == IsStream::Yes
+    }
+
+    pub fn is_end(&self) -> bool {
+        self.end == IsEnd::Yes
+    }
+
     pub(crate) fn flags(&self) -> u8 {
-        self.is_stream as u8 | self.is_end as u8 | self.body_type as u8
+        self.stream as u8 | self.end as u8 | self.body_type as u8
     }
     pub(crate) fn header(&self) -> [u8; 9] {
         let mut header = [0; 9];

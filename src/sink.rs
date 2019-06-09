@@ -1,11 +1,38 @@
 use core::pin::Pin;
 use core::task::{Context, Poll, Poll::Pending, Poll::Ready};
-use futures::io::{AsyncWrite, AsyncWriteExt, Error};
+use futures::io::{AsyncWrite, AsyncWriteExt};
 use futures::sink::Sink;
 use std::mem::replace;
 
+// use crate::error::{Error, Error::*};
 use crate::packet::*;
 use crate::PinFut;
+use snafu::{ResultExt, Snafu};
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("Failed to send goodbye packet: {}", source))]
+    SendGoodbye {
+        source: std::io::Error
+    },
+
+    #[snafu(display("Failed to send packet: {}", source))]
+    Send {
+        source: std::io::Error
+    },
+
+    #[snafu(display("Failed to flush sink: {}", source))]
+    Flush {
+        source: std::io::Error
+    },
+
+    #[snafu(display("Error while closing sink: {}", source))]
+    Close {
+        source: std::io::Error
+    },
+
+
+}
 
 async fn send<W>(mut w: W, msg: Packet) -> (W, Result<(), Error>)
 where
@@ -16,7 +43,7 @@ where
     if r.is_ok() {
         r = w.write_all(&msg.body).await;
     }
-    (w, r.map(|_| ()))
+    (w, r.map(|_| ()).context(Send))
 }
 
 async fn send_goodbye<W>(mut w: W) -> (W, Result<(), Error>)
@@ -24,7 +51,7 @@ where
     W: AsyncWrite + Unpin + 'static,
 {
     let r = w.write_all(&[0; 9]).await;
-    (w, r.map(|_| ()))
+    (w, r.map(|_| ()).context(SendGoodbye{}))
 }
 
 /// #Examples
@@ -86,14 +113,14 @@ where
 {
     match state {
         State::Ready(mut w) => {
-            let p = Pin::new(&mut w).poll_flush(cx);
+            let p = Pin::new(&mut w).poll_flush(cx).map(|r| r.context(Flush));
             (State::Ready(w), p)
         }
         State::Sending(mut f) => match f.as_mut().poll(cx) {
             Pending => (State::Sending(f), Pending),
             Ready((w, Err(e))) => close(State::Closing(w, Some(e)), cx),
             Ready((mut w, Ok(()))) => {
-                let p = Pin::new(&mut w).poll_flush(cx);
+                let p = Pin::new(&mut w).poll_flush(cx).map(|r| r.context(Flush));
                 (State::Ready(w), p)
             }
         },
@@ -116,12 +143,12 @@ where
             Pending => (State::SendingGoodbye(f), Pending),
             Ready((w, Err(e))) => close(State::Closing(w, Some(e)), cx),
             Ready((mut w, Ok(()))) => {
-                let p = Pin::new(&mut w).poll_close(cx);
+                let p = Pin::new(&mut w).poll_close(cx).map(|r| r.context(Close));
                 (State::Closing(w, None), p)
             }
         },
         State::Closing(mut w, e) => {
-            match (Pin::new(&mut w).poll_close(cx), e) {
+            match (Pin::new(&mut w).poll_close(cx).map(|r| r.context(Close)), e) {
                 (Pending, e) => (State::Closing(w, e), Pending),
                 (Ready(r), None) => (State::Closed(w), Ready(r)),
                 (Ready(_), Some(e)) => (State::Closed(w), Ready(Err(e))), // Combine errors if this fails?

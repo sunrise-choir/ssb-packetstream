@@ -3,37 +3,54 @@ use core::pin::Pin;
 use core::task::{Context, Poll, Poll::Pending, Poll::Ready};
 use futures::io::{AsyncRead, AsyncReadExt};
 use futures::stream::TryStream;
-use std::io::{Error, ErrorKind};
 use std::mem::replace;
 
 use crate::packet::*;
 use crate::PinFut;
+use snafu::{ensure, ResultExt, Snafu};
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("Failed to receive packet: {}", source))]
+    Recv {
+        source: std::io::Error
+    },
+
+    #[snafu(display("IO error while reading packet header: {}", source))]
+    Header {
+        source: std::io::Error
+    },
+
+    #[snafu(display("IO error while reading packet body. Body size: {}. Error: {}", size, source))]
+    Body {
+        size: usize,
+        source: std::io::Error
+    },
+
+    #[snafu(display("PacketStream underlying reader closed without goodbye"))]
+    NoGoodbye {},
+}
 
 async fn recv<R>(r: &mut R) -> Result<Option<Packet>, Error>
 where
     R: AsyncRead + Unpin,
 {
     let mut head = [0; 9];
-    let n = r.read(&mut head).await?;
-    if n == 0 {
-        return Err(Error::new(
-            ErrorKind::UnexpectedEof,
-            "PacketStream underlying reader closed without goodbye",
-        ));
-    }
+    let n = r.read(&mut head).await.context(Header)?;
+    ensure!(n != 0, NoGoodbye);
     if n < head.len() {
-        r.read_exact(&mut head[n..]).await?;
+        r.read_exact(&mut head[n..]).await.context(Header)?;
     }
 
     if head == [0u8; 9] {
         return Ok(None); // RPC goodbye
     }
 
-    let body_len = BigEndian::read_u32(&head[1..5]);
+    let body_len = BigEndian::read_u32(&head[1..5]) as usize;
     let id = BigEndian::read_i32(&head[5..]);
 
-    let mut body = vec![0; body_len as usize];
-    r.read_exact(&mut body).await?;
+    let mut body = vec![0; body_len];
+    r.read_exact(&mut body).await.context(Body{size: body_len})?;
 
     Ok(Some(Packet::new(
         head[0].into(),

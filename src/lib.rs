@@ -29,8 +29,8 @@ mod tests {
         assert_eq!(p.flags(), expected_head[0]);
         assert_eq!(p.header(), expected_head);
 
-        p.is_end = IsEnd::Yes;
-        p.is_stream = IsStream::No;
+        p.end = IsEnd::Yes;
+        p.stream = IsStream::No;
         p.body_type = BodyType::Binary;
         assert_eq!(p.flags(), 0b0000_0100);
     }
@@ -127,8 +127,8 @@ mod tests {
             .unwrap();
 
             let p = stream.try_next().await.unwrap().unwrap();
-            assert_eq!(p.is_stream, IsStream::Yes);
-            assert_eq!(p.is_end, IsEnd::No);
+            assert!(p.is_stream());
+            assert!(!p.is_end());
             assert_eq!(p.body_type, BodyType::Utf8);
             assert_eq!(p.id, 10);
             assert_eq!(&p.body, &[1, 2, 3, 4, 5]);
