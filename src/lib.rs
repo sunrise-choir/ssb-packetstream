@@ -1,5 +1,6 @@
 #![feature(async_await)]
 
+mod mux;
 mod packet;
 mod sink;
 mod stream;
@@ -7,6 +8,7 @@ mod stream;
 pub use packet::*;
 pub use sink::*;
 pub use stream::*;
+pub use mux::*;
 
 use core::future::Future;
 use core::pin::Pin;
