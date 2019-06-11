@@ -1,7 +1,7 @@
 use crate::*;
 use futures::channel::mpsc::{self, Receiver, Sender, SendError};
-use futures::future::{join, FutureExt};
-use futures::stream::{Stream, StreamExt, TryStreamExt};
+use futures::future::{join};
+use futures::stream::{StreamExt, TryStreamExt};
 use futures::sink::{SinkExt};
 use futures::io::{AsyncRead, AsyncWrite};
 use std::collections::HashMap;
@@ -49,114 +49,50 @@ fn child_sink_map() -> ChildSinkMap {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-type DoneFuture<T> = Pin<Box<dyn Future<Output = Result<(), Error<T>>>>>;
-
-pub struct MuxStream<R, HandlerErrorT>
-where HandlerErrorT: error::Error + 'static,
-{
-    out_sender: Sender<Packet>,
+pub struct MuxSender<E> {
+    inner: Sender<Packet>,
     response_sinks: ChildSinkMap,
-    continuation_sinks: ChildSinkMap,
-    inner: Option<(PacketStream<R>, DoneFuture<HandlerErrorT>)>,
-    error_t: PhantomData<HandlerErrorT>,
+    phantom: PhantomData<E>
 }
 
-fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    mpsc::channel::<T>(128) // Arbitrary
-}
+// Inbound side needs:
+//   - &mut response_sink_map     (for ids < 0)
+//   - &mut continuation_sink_map (for ids > 0)
+//   - out_sender (owned clone)
+// returns:
+//   - input completion future?
+// ! need to provide a way to shutdown
+//
+// Outbound side needs:
+//   - &mut response_sink_map
+//   - out_sender (owned clone)
 
-/*
-
-let mux = MuxStream::new(r, w);
-
-async {
-  mux.handle_incoming(async |p, inn, out| {
-
-  })
-}
-
-async {
-  let inn = mux.send(CreateHistStream(id, opts)).await?;
-  inn.for_each(write_to_flume).await?;
-}
-
-async {
-  let (inn, out) = mux.send_duplex(Ping).await?;
-  let t0 = ms_since_epoch();
-  out.send(t0).await?;
-  let t1 = inn.next().await?;
-}
-*/
-
-impl<R, E> MuxStream<R, E>
+pub fn mux<R, W, H, E, T>(r: R, w: W, handler: H)
+                          -> (MuxSender<E>, impl Future<Output = Result<(), Error<E>>>)
 where
     R: AsyncRead + Unpin + 'static,
+    W: AsyncWrite + Unpin + 'static,
+    H: Fn(Packet, Sender<Packet>, Option<Receiver<Packet>>) -> T,
+    T: Future<Output = Result<(), E>>,
     E: error::Error + 'static,
 {
-    pub fn new<W>(r: R, w: W) -> MuxStream<R, E>
-    where
-        W: AsyncWrite + Unpin + 'static,
-    {
-        let (sender, receiver) = channel();
-        let out_done = async {
-            receiver.map(|p| Ok(p)).forward(PacketSink::new(w)).await.context(Outgoing)
-        };
 
-        MuxStream {
-            out_sender: sender,
-            response_sinks: child_sink_map(),
-            continuation_sinks: child_sink_map(),
-            inner: Some((PacketStream::new(r), out_done.boxed_local())),
-            error_t: PhantomData,
-        }
-    }
+    let (shared_sender, recv) = channel();
+    let out_done = async move {
+        recv.map(|p| Ok(p)).forward(PacketSink::new(w)).await.context(Outgoing)
+    };
 
-    fn new_response_stream(&mut self, p: &Packet) -> ChildStream {
-        let (in_sink, in_stream) = channel();
-        self.response_sinks.lock().unwrap().insert(-p.id, in_sink);
-        in_stream
-    }
+    let response_sinks = child_sink_map();
+    let continuation_sinks = child_sink_map();
 
-    pub async fn send(&mut self, packet: Packet) -> Result<ChildStream, Error<E>> {
-        let stream = self.new_response_stream(&packet);
-        self.out_sender.send(packet).await.context(Channel)?;
-        Ok(stream)
-    }
+    let sender = MuxSender::<E> {
+        inner: shared_sender.clone(),
+        response_sinks: response_sinks.clone(),
+        phantom: PhantomData,
+    };
 
-    pub async fn send_duplex<S>(&mut self, packet: Packet) -> Result<(ChildSink, ChildStream), Error<E>>
-    where
-        S: Stream<Item = Packet> + Unpin
-    {
-        let (inn_sink, inn) = channel();
-        self.response_sinks.lock().unwrap().insert(packet.id, inn_sink);
-
-        let mut out = self.out_sender.clone();
-        out.send(packet).await.context(Channel)?;
-
-        Ok((out, inn))
-    }
-
-    pub async fn run<H, T>(&mut self, handler: H) -> (Result<(), Error<E>>, Result<(), Error<E>>)
-    where
-        H: Fn(Packet, Sender<Packet>, Option<Receiver<Packet>>) -> T,
-        T: Future<Output = Result<(), E>>,
-    {
-        let (in_stream, out_done) = self.inner.take().unwrap();
-        let out = self.out_sender.clone();
-        let response_sinks = self.response_sinks.clone();
-        let continuation_sinks = self.continuation_sinks.clone();
-
-        // Inbound side needs:
-        //   - &mut response_sink_map     (for ids < 0)
-        //   - &mut continuation_sink_map (for ids > 0)
-        //   - out_sender (owned clone)
-        // returns:
-        //   - input completion future?
-        // ! need to provide a way to shutdown
-        //
-        // Outbound side needs:
-        //   - &mut response_sink_map
-        //   - out_sender (owned clone)
+    let done = async move {
+        let in_stream = PacketStream::new(r);
 
         const OPEN_STREAMS_LIMIT: usize = 128;
         let in_done = in_stream.context(Incoming)
@@ -197,15 +133,48 @@ where
                             csinks.insert(p.id, inn_sink);
                         }
                         eprintln!("created new continuation sink for id: {}", p.id);
-                        handler(p, out.clone(), Some(inn)).await.context(Handler)
+                        handler(p, shared_sender.clone(), Some(inn)).await.context(Handler)
                     } else {
-                        handler(p, out.clone(), None).await.context(Handler)
+                        handler(p, shared_sender.clone(), None).await.context(Handler)
                     }
                 }
             });
+        let (in_r, out_r) = join(in_done, out_done).await;
+        in_r.or(out_r)
+    };
+    (sender, done)
+}
 
-        join(in_done, out_done).await
+fn channel<T>() -> (Sender<T>, Receiver<T>) {
+    mpsc::channel::<T>(128) // Arbitrary
+}
+
+impl<E> MuxSender<E>
+where
+    E: error::Error + 'static,
+{
+    fn new_response_stream(&mut self, p: &Packet) -> ChildStream {
+        let (in_sink, in_stream) = channel();
+        self.response_sinks.lock().unwrap().insert(-p.id, in_sink);
+        in_stream
     }
+
+    pub async fn send(&mut self, packet: Packet) -> Result<ChildStream, Error<E>> {
+        let stream = self.new_response_stream(&packet);
+        self.inner.send(packet).await.context(Channel)?;
+        Ok(stream)
+    }
+
+    pub async fn send_duplex(&mut self, packet: Packet) -> Result<(ChildSink, ChildStream), Error<E>> {
+        let (inn_sink, inn) = channel();
+        self.response_sinks.lock().unwrap().insert(-packet.id, inn_sink);
+
+        let mut out = self.inner.clone();
+        out.send(packet).await.context(Channel)?;
+
+        Ok((out, inn))
+    }
+
 }
 
 
@@ -282,18 +251,16 @@ mod tests {
     }
 
     #[test]
-    fn mux_one_side() {
+    fn mux_one_way() {
         let (client_w, server_r) = async_ringbuffer::ring_buffer(2048);
         let (server_w, client_r) = async_ringbuffer::ring_buffer(2048);
 
         let mut pool = LocalPool::new();
         let mut spawner = pool.spawner();
 
-        let mut server_mux = MuxStream::new(server_r, server_w);
+        let (_server_out, server_done) = mux(server_r, server_w, cool_rpc);
 
-        let done = spawner.spawn_local_with_handle(async move {
-            server_mux.run(cool_rpc).await
-        }).unwrap();
+        let _server_done = spawner.spawn_local_with_handle(server_done);
 
         let mut client_in = PacketStream::new(client_r);
         let mut client_out = PacketSink::new(client_w);
@@ -372,9 +339,99 @@ mod tests {
 
         let _p = pool.run_until(reply);
 
-        // assert!(false);
         // let p = pool.run_until(done);
         // pool.run();
+    }
+
+    fn sb_packet(b: u8, id: i32) -> Packet {
+        Packet::new(
+            IsStream::Yes,
+            IsEnd::No,
+            BodyType::Binary,
+            id,
+            vec![b],
+        )
+    }
+
+    #[test]
+    fn mux_two_way() {
+        let (client_w, server_r) = async_ringbuffer::ring_buffer(2048);
+        let (server_w, client_r) = async_ringbuffer::ring_buffer(2048);
+
+        let mut pool = LocalPool::new();
+        let mut spawner = pool.spawner();
+
+        let (mut server_out, server_done) = mux(server_r, server_w, cool_rpc);
+        let (mut client_out, client_done) = mux(client_r, client_w, cool_rpc);
+
+        let _server_done = spawner.spawn_local_with_handle(server_done);
+        let _client_done = spawner.spawn_local_with_handle(client_done);
+
+        let reply = spawner.spawn_local_with_handle(async move {
+            // Call Reverse procedure
+            let mut rev_response = client_out.send(Packet::new(
+                IsStream::No,
+                IsEnd::No,
+                BodyType::Binary,
+                1,
+                vec!['R' as u8, 1, 2, 3, 4, 5],
+            )).await.unwrap();
+
+            // Call Double (stream) procedure
+            let (mut dub1_out, mut dub1_in) = client_out
+                .send_duplex(sb_packet('D' as u8, 3))
+                .await.unwrap();
+
+            dub1_out.send(sb_packet(6, 3)).await.unwrap();
+
+            let p = dub1_in.next().await.unwrap();
+            assert_eq!(p.id, -3);
+            assert_eq!(p.body, &[12]);
+
+            // Check rev response
+            let p = rev_response.next().await.unwrap();
+            assert_eq!(p.id, -1);
+            assert_eq!(p.body, &[5, 4, 3, 2, 1]);
+
+            dub1_out.send(sb_packet(8, 3)).await.unwrap();
+
+            let (mut dub3_out, mut dub3_in) = server_out
+                .send_duplex(sb_packet('D' as u8, 1))
+                .await.unwrap();
+            dub3_out.send(sb_packet(30, 1)).await.unwrap();
+
+            let (mut dub2_out, mut dub2_in) = client_out
+                .send_duplex(sb_packet('D' as u8, 4))
+                .await.unwrap();
+            dub2_out.send(sb_packet(44, 4)).await.unwrap();
+            dub1_out.send(sb_packet(10, 3)).await.unwrap();
+            dub3_out.send(sb_packet(30, 1)).await.unwrap();
+
+            let p = dub3_in.next().await.unwrap();
+            assert_eq!(p.id, -1);
+            assert_eq!(p.body, &[60]);
+
+            let p = dub2_in.next().await.unwrap();
+            assert_eq!(p.id, -4);
+            assert_eq!(p.body, &[88]);
+
+            let p = dub1_in.next().await.unwrap();
+            assert_eq!(p.id, -3);
+            assert_eq!(p.body, &[16]);
+
+            dub2_out.send(sb_packet(100, 4)).await.unwrap();
+
+            let p = dub2_in.next().await.unwrap();
+            assert_eq!(p.id, -4);
+            assert_eq!(p.body, &[200]);
+
+            let p = dub1_in.next().await.unwrap();
+            assert_eq!(p.id, -3);
+            assert_eq!(p.body, &[20]);
+
+        }).unwrap();
+
+        let _p = pool.run_until(reply);
     }
 
 }
