@@ -1,6 +1,6 @@
 use crate::*;
 use futures::channel::mpsc::{self, Receiver, Sender, SendError};
-use futures::future::{join};
+use futures::future::{join, FutureExt};
 use futures::stream::{StreamExt, TryStreamExt};
 use futures::sink::{SinkExt};
 use futures::io::{AsyncRead, AsyncWrite};
@@ -52,7 +52,25 @@ fn child_sink_map() -> ChildSinkMap {
 pub struct MuxSender<E> {
     inner: Sender<Packet>,
     response_sinks: ChildSinkMap,
-    phantom: PhantomData<E>
+    phantom: PhantomData<E>,
+}
+
+impl<E> MuxSender<E> {
+    fn new_response_stream(&mut self, p: &Packet) -> ChildStream {
+        let (in_sink, in_stream) = channel();
+        self.response_sinks.lock().unwrap().insert(-p.id, in_sink);
+        in_stream
+    }
+
+    pub fn close(&mut self) {
+        self.inner.close_channel();
+    }
+}
+
+impl<E> Drop for MuxSender<E> {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 // Inbound side needs:
@@ -79,7 +97,9 @@ where
 
     let (shared_sender, recv) = channel();
     let out_done = async move {
-        recv.map(|p| Ok(p)).forward(PacketSink::new(w)).await.context(Outgoing)
+        let r = recv.map(|p| Ok(p)).forward(PacketSink::new(w)).await.context(Outgoing);
+        eprintln!("FORWARDED ALL");
+        r
     };
 
     let response_sinks = child_sink_map();
@@ -104,7 +124,6 @@ where
                         if p.is_stream() && p.is_end() {
                             sink.close().await.context(Channel)
                         } else {
-                            eprintln!("forwarding packet to response sink");
                             sink.send(p).await.context(Channel)
                         }
                     } else {
@@ -112,18 +131,15 @@ where
                         Ok(())
                     }
                 } else {
-                    dbg!(1);
                     let mut maybe_sink = {
                         let csinks = continuation_sinks.lock().unwrap();
                         csinks.get(&p.id).map(|s| s.clone())
                     };
-                    dbg!(2);
                     if let Some(ref mut sink) = maybe_sink {
                         eprintln!("found continuation sink for id: {}", p.id);
                         if p.is_stream() && p.is_end() {
                             sink.close().await.context(Channel)
                         } else {
-                            eprintln!("forwarding packet to response sink");
                             sink.send(p).await.context(Channel)
                         }
                     } else if p.is_stream() {
@@ -138,7 +154,7 @@ where
                         handler(p, shared_sender.clone(), None).await.context(Handler)
                     }
                 }
-            });
+            }).map(|r| { eprintln!("IN_DONE"); r });
         let (in_r, out_r) = join(in_done, out_done).await;
         in_r.or(out_r)
     };
@@ -153,12 +169,6 @@ impl<E> MuxSender<E>
 where
     E: error::Error + 'static,
 {
-    fn new_response_stream(&mut self, p: &Packet) -> ChildStream {
-        let (in_sink, in_stream) = channel();
-        self.response_sinks.lock().unwrap().insert(-p.id, in_sink);
-        in_stream
-    }
-
     pub async fn send(&mut self, packet: Packet) -> Result<ChildStream, Error<E>> {
         let stream = self.new_response_stream(&packet);
         self.inner.send(packet).await.context(Channel)?;
@@ -174,7 +184,6 @@ where
 
         Ok((out, inn))
     }
-
 }
 
 
@@ -258,9 +267,9 @@ mod tests {
         let mut pool = LocalPool::new();
         let mut spawner = pool.spawner();
 
-        let (_server_out, server_done) = mux(server_r, server_w, cool_rpc);
+        let (mut server_out, server_done) = mux(server_r, server_w, cool_rpc);
 
-        let _server_done = spawner.spawn_local_with_handle(server_done);
+        let server_done = spawner.spawn_local_with_handle(server_done).unwrap();
 
         let mut client_in = PacketStream::new(client_r);
         let mut client_out = PacketSink::new(client_w);
@@ -337,10 +346,10 @@ mod tests {
 
         }).unwrap();
 
-        let _p = pool.run_until(reply);
+        pool.run_until(reply);
 
-        // let p = pool.run_until(done);
-        // pool.run();
+        server_out.close();
+        pool.run_until(server_done).unwrap();
     }
 
     fn sb_packet(b: u8, id: i32) -> Packet {
@@ -364,74 +373,82 @@ mod tests {
         let (mut server_out, server_done) = mux(server_r, server_w, cool_rpc);
         let (mut client_out, client_done) = mux(client_r, client_w, cool_rpc);
 
-        let _server_done = spawner.spawn_local_with_handle(server_done);
-        let _client_done = spawner.spawn_local_with_handle(client_done);
+        let _server_done = spawner.spawn_local_with_handle(server_done).unwrap();
+        let _client_done = spawner.spawn_local_with_handle(client_done).unwrap();
 
         let reply = spawner.spawn_local_with_handle(async move {
             // Call Reverse procedure
+            let rev_id = 1;
             let mut rev_response = client_out.send(Packet::new(
                 IsStream::No,
                 IsEnd::No,
                 BodyType::Binary,
-                1,
+                rev_id,
                 vec!['R' as u8, 1, 2, 3, 4, 5],
             )).await.unwrap();
 
             // Call Double (stream) procedure
-            let (mut dub1_out, mut dub1_in) = client_out
-                .send_duplex(sb_packet('D' as u8, 3))
+            let a_id = 2;
+            let (mut a_out, mut a_in) = client_out
+                .send_duplex(sb_packet('D' as u8, a_id))
                 .await.unwrap();
 
-            dub1_out.send(sb_packet(6, 3)).await.unwrap();
+            a_out.send(sb_packet(6, a_id)).await.unwrap();
 
-            let p = dub1_in.next().await.unwrap();
-            assert_eq!(p.id, -3);
+            let p = a_in.next().await.unwrap();
+            assert_eq!(p.id, -a_id);
             assert_eq!(p.body, &[12]);
 
             // Check rev response
             let p = rev_response.next().await.unwrap();
-            assert_eq!(p.id, -1);
+            assert_eq!(p.id, -rev_id);
             assert_eq!(p.body, &[5, 4, 3, 2, 1]);
 
-            dub1_out.send(sb_packet(8, 3)).await.unwrap();
+            a_out.send(sb_packet(8, a_id)).await.unwrap();
 
             let (mut dub3_out, mut dub3_in) = server_out
                 .send_duplex(sb_packet('D' as u8, 1))
                 .await.unwrap();
             dub3_out.send(sb_packet(30, 1)).await.unwrap();
 
-            let (mut dub2_out, mut dub2_in) = client_out
-                .send_duplex(sb_packet('D' as u8, 4))
+            let b_id = 3;
+            let (mut b_out, mut b_in) = client_out
+                .send_duplex(sb_packet('D' as u8, b_id))
                 .await.unwrap();
-            dub2_out.send(sb_packet(44, 4)).await.unwrap();
-            dub1_out.send(sb_packet(10, 3)).await.unwrap();
+            b_out.send(sb_packet(44, b_id)).await.unwrap();
+            a_out.send(sb_packet(10, a_id)).await.unwrap();
             dub3_out.send(sb_packet(30, 1)).await.unwrap();
 
             let p = dub3_in.next().await.unwrap();
             assert_eq!(p.id, -1);
             assert_eq!(p.body, &[60]);
 
-            let p = dub2_in.next().await.unwrap();
-            assert_eq!(p.id, -4);
+            let p = b_in.next().await.unwrap();
+            assert_eq!(p.id, -b_id);
             assert_eq!(p.body, &[88]);
 
-            let p = dub1_in.next().await.unwrap();
-            assert_eq!(p.id, -3);
+            let p = a_in.next().await.unwrap();
+            assert_eq!(p.id, -a_id);
             assert_eq!(p.body, &[16]);
 
-            dub2_out.send(sb_packet(100, 4)).await.unwrap();
+            b_out.send(sb_packet(100, b_id)).await.unwrap();
 
-            let p = dub2_in.next().await.unwrap();
-            assert_eq!(p.id, -4);
+            let p = b_in.next().await.unwrap();
+            assert_eq!(p.id, -b_id);
             assert_eq!(p.body, &[200]);
 
-            let p = dub1_in.next().await.unwrap();
-            assert_eq!(p.id, -3);
+            let p = a_in.next().await.unwrap();
+            assert_eq!(p.id, -a_id);
             assert_eq!(p.body, &[20]);
 
+            server_out.close();
         }).unwrap();
 
-        let _p = pool.run_until(reply);
+        pool.run_until(reply);
+
+        // // XXX: server_done doesn't finish
+        // let p = pool.run_until(server_done);
+        // let p = pool.run_until(client_done);
     }
 
 }
