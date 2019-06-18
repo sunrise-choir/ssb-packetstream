@@ -1,8 +1,8 @@
 use crate::*;
 use futures::channel::mpsc::{self, Receiver, Sender, SendError};
 use futures::future::{join, FutureExt};
-use futures::stream::{StreamExt, TryStreamExt};
-use futures::sink::{SinkExt};
+use futures::stream::{Stream, StreamExt, TryStreamExt};
+use futures::sink::{Sink, SinkExt};
 use futures::io::{AsyncRead, AsyncWrite};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -51,14 +51,35 @@ fn child_sink_map() -> ChildSinkMap {
 
 pub struct MuxSender<E> {
     inner: Sender<Packet>,
+    _id: i32,
     response_sinks: ChildSinkMap,
     phantom: PhantomData<E>,
 }
 
 impl<E> MuxSender<E> {
-    fn new_response_stream(&mut self, p: &Packet) -> ChildStream {
+    fn new(inner: Sender<Packet>, response_sinks: ChildSinkMap) -> MuxSender<E> {
+        MuxSender {
+            inner,
+            _id: 1,
+            response_sinks,
+            phantom: PhantomData,
+        }
+    }
+
+    fn next_id(&mut self) -> i32 {
+        let id = self._id;
+
+        // TODO: check js behavior
+        self._id = match self._id.checked_add(1) {
+            None => 1,
+            Some(i) => i
+        };
+        id
+    }
+
+    fn new_response_stream(&mut self, request_id: i32) -> ChildStream {
         let (in_sink, in_stream) = channel();
-        self.response_sinks.lock().unwrap().insert(-p.id, in_sink);
+        self.response_sinks.lock().unwrap().insert(-request_id, in_sink);
         in_stream
     }
 
@@ -67,9 +88,89 @@ impl<E> MuxSender<E> {
     }
 }
 
+impl<E> MuxSender<E>
+where
+    E: error::Error + 'static,
+{
+    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<ChildStream, Error<E>> {
+        let out_id = self.next_id();
+        let in_stream = self.new_response_stream(out_id);
+
+        let p = Packet::new(IsStream::No, IsEnd::No, body_type, out_id, body);
+        self.inner.send(p).await.context(Channel)?;
+        Ok(in_stream)
+    }
+
+    pub async fn send_duplex(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(MuxChildSender<E>, ChildStream), Error<E>> {
+        let out_id = self.next_id();
+        let in_stream = self.new_response_stream(out_id);
+
+        let mut out = MuxChildSender {
+            id: out_id,
+            is_stream: IsStream::Yes,
+            sink: self.inner.clone(),
+            phantom: PhantomData,
+        };
+        out.send(body_type, body).await?;
+
+        Ok((out, in_stream))
+    }
+}
+
 impl<E> Drop for MuxSender<E> {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+// TODO: name
+pub struct MuxChildSender<E> {
+    id: i32,
+    is_stream: IsStream,
+    sink: Sender<Packet>,
+    phantom: PhantomData<E>,
+}
+impl<E> MuxChildSender<E>
+where E: error::Error + 'static,
+{
+    fn new(id: i32, is_stream: IsStream, sink: Sender<Packet>) -> MuxChildSender<E> {
+        MuxChildSender {
+            id,
+            is_stream,
+            sink,
+            phantom: PhantomData,
+        }
+    }
+
+    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), Error<E>> {
+        self.send_packet(Packet::new(self.is_stream,
+                                     IsEnd::No,
+                                     body_type,
+                                     self.id,
+                                     body)).await
+    }
+
+    pub async fn send_end(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), Error<E>> {
+        self.send_packet(Packet::new(self.is_stream,
+                                     IsEnd::Yes,
+                                     body_type,
+                                     self.id,
+                                     body)).await
+    }
+
+    pub async fn send_all<S>(&mut self, s: S) -> Result<(), Error<E>>
+    where S: Stream<Item = (BodyType, Vec<u8>)> + Unpin,
+    {
+        let id = self.id;
+        let is_stream = self.is_stream;
+
+        // TODO: better error context
+        let mut stream = s.map(|(bt, b)| Packet::new(is_stream, IsEnd::No, bt, id, b));
+        self.sink.send_all(&mut stream).await.context(Channel)
+    }
+
+    async fn send_packet(&mut self, p: Packet) -> Result<(), Error<E>> {
+        self.sink.send(p).await.context(Channel)
     }
 }
 
@@ -105,11 +206,7 @@ where
     let response_sinks = child_sink_map();
     let continuation_sinks = child_sink_map();
 
-    let sender = MuxSender::<E> {
-        inner: shared_sender.clone(),
-        response_sinks: response_sinks.clone(),
-        phantom: PhantomData,
-    };
+    let sender = MuxSender::new(shared_sender.clone(), response_sinks.clone());
 
     let done = async move {
         let in_stream = PacketStream::new(r);
@@ -163,27 +260,6 @@ where
 
 fn channel<T>() -> (Sender<T>, Receiver<T>) {
     mpsc::channel::<T>(128) // Arbitrary
-}
-
-impl<E> MuxSender<E>
-where
-    E: error::Error + 'static,
-{
-    pub async fn send(&mut self, packet: Packet) -> Result<ChildStream, Error<E>> {
-        let stream = self.new_response_stream(&packet);
-        self.inner.send(packet).await.context(Channel)?;
-        Ok(stream)
-    }
-
-    pub async fn send_duplex(&mut self, packet: Packet) -> Result<(ChildSink, ChildStream), Error<E>> {
-        let (inn_sink, inn) = channel();
-        self.response_sinks.lock().unwrap().insert(-packet.id, inn_sink);
-
-        let mut out = self.inner.clone();
-        out.send(packet).await.context(Channel)?;
-
-        Ok((out, inn))
-    }
 }
 
 
@@ -379,21 +455,17 @@ mod tests {
         let reply = spawner.spawn_local_with_handle(async move {
             // Call Reverse procedure
             let rev_id = 1;
-            let mut rev_response = client_out.send(Packet::new(
-                IsStream::No,
-                IsEnd::No,
-                BodyType::Binary,
-                rev_id,
-                vec!['R' as u8, 1, 2, 3, 4, 5],
-            )).await.unwrap();
+            let mut rev_response = client_out.send(BodyType::Binary,
+                                                   vec!['R' as u8, 1, 2, 3, 4, 5])
+                .await.unwrap();
 
             // Call Double (stream) procedure
             let a_id = 2;
             let (mut a_out, mut a_in) = client_out
-                .send_duplex(sb_packet('D' as u8, a_id))
+                .send_duplex(BodyType::Binary, vec!['D' as u8])
                 .await.unwrap();
 
-            a_out.send(sb_packet(6, a_id)).await.unwrap();
+            a_out.send(BodyType::Binary, vec![6]).await.unwrap();
 
             let p = a_in.next().await.unwrap();
             assert_eq!(p.id, -a_id);
@@ -404,20 +476,20 @@ mod tests {
             assert_eq!(p.id, -rev_id);
             assert_eq!(p.body, &[5, 4, 3, 2, 1]);
 
-            a_out.send(sb_packet(8, a_id)).await.unwrap();
+            a_out.send(BodyType::Binary, vec![8]).await.unwrap();
 
             let (mut dub3_out, mut dub3_in) = server_out
-                .send_duplex(sb_packet('D' as u8, 1))
+                .send_duplex(BodyType::Binary, vec!['D' as u8])
                 .await.unwrap();
-            dub3_out.send(sb_packet(30, 1)).await.unwrap();
+            dub3_out.send(BodyType::Binary, vec![30]).await.unwrap();
 
             let b_id = 3;
             let (mut b_out, mut b_in) = client_out
-                .send_duplex(sb_packet('D' as u8, b_id))
+                .send_duplex(BodyType::Binary, vec!['D' as u8])
                 .await.unwrap();
-            b_out.send(sb_packet(44, b_id)).await.unwrap();
-            a_out.send(sb_packet(10, a_id)).await.unwrap();
-            dub3_out.send(sb_packet(30, 1)).await.unwrap();
+            b_out.send(BodyType::Binary, vec![44]).await.unwrap();
+            a_out.send(BodyType::Binary, vec![10]).await.unwrap();
+            dub3_out.send(BodyType::Binary, vec![30]).await.unwrap();
 
             let p = dub3_in.next().await.unwrap();
             assert_eq!(p.id, -1);
@@ -431,7 +503,7 @@ mod tests {
             assert_eq!(p.id, -a_id);
             assert_eq!(p.body, &[16]);
 
-            b_out.send(sb_packet(100, b_id)).await.unwrap();
+            b_out.send(BodyType::Binary, vec![100]).await.unwrap();
 
             let p = b_in.next().await.unwrap();
             assert_eq!(p.id, -b_id);
