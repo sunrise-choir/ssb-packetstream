@@ -15,7 +15,6 @@ use snafu::{futures::TryStreamExt as SnafuTSE, ResultExt, Snafu};
 pub enum Error<HandlerErrorT>
 where HandlerErrorT: std::error::Error + 'static
 {
-
     #[snafu(display("PacketSink failure: {}", source))]
     Outgoing {
         source: sink::Error
@@ -26,16 +25,37 @@ where HandlerErrorT: std::error::Error + 'static
         source: stream::Error
     },
 
-    #[snafu(display("Error sending packet: {}", source))]
-    Channel {
+    #[snafu(display("Sub stream failure: {}", source))]
+    SubStream {
         source: SendError
     },
 
-    #[snafu(display("Error sending packet: {}", source))]
+    #[snafu(display("Mux packet handler error: {}", source))]
     Handler {
         source: HandlerErrorT
     },
 }
+
+#[derive(Debug, Snafu)]
+pub enum ChildError {
+    // TODO: better name, useful context, better messages
+
+    #[snafu(display("Error sending packet: {}", source))]
+    Send {
+        source: SendError
+    },
+
+    #[snafu(display("Error sending stream end packet: {}", source))]
+    SendEnd {
+        source: SendError
+    },
+
+    #[snafu(display("Error sending stream: {}", source))]
+    SendAll {
+        source: SendError
+    },
+}
+
 
 // Packets with id < 0 are responses to one of our
 // outgoing requests.
@@ -49,20 +69,18 @@ fn child_sink_map() -> ChildSinkMap {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-pub struct MuxSender<E> {
+pub struct MuxSender {
     inner: Sender<Packet>,
     _id: i32,
     response_sinks: ChildSinkMap,
-    phantom: PhantomData<E>,
 }
 
-impl<E> MuxSender<E> {
-    fn new(inner: Sender<Packet>, response_sinks: ChildSinkMap) -> MuxSender<E> {
+impl MuxSender {
+    fn new(inner: Sender<Packet>, response_sinks: ChildSinkMap) -> MuxSender {
         MuxSender {
             inner,
             _id: 1,
             response_sinks,
-            phantom: PhantomData,
         }
     }
 
@@ -88,20 +106,17 @@ impl<E> MuxSender<E> {
     }
 }
 
-impl<E> MuxSender<E>
-where
-    E: error::Error + 'static,
-{
-    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<ChildStream, Error<E>> {
+impl MuxSender {
+    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<ChildStream, ChildError> {
         let out_id = self.next_id();
         let in_stream = self.new_response_stream(out_id);
 
         let p = Packet::new(IsStream::No, IsEnd::No, body_type, out_id, body);
-        self.inner.send(p).await.context(Channel)?;
+        self.inner.send(p).await.context(Send)?;
         Ok(in_stream)
     }
 
-    pub async fn send_duplex(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(MuxChildSender<E>, ChildStream), Error<E>> {
+    pub async fn send_duplex(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(MuxChildSender, ChildStream), ChildError> {
         let out_id = self.next_id();
         let in_stream = self.new_response_stream(out_id);
 
@@ -109,7 +124,6 @@ where
             id: out_id,
             is_stream: IsStream::Yes,
             sink: self.inner.clone(),
-            phantom: PhantomData,
         };
         out.send(body_type, body).await?;
 
@@ -117,60 +131,55 @@ where
     }
 }
 
-impl<E> Drop for MuxSender<E> {
+impl Drop for MuxSender {
     fn drop(&mut self) {
         self.close();
     }
 }
 
 // TODO: name
-pub struct MuxChildSender<E> {
+pub struct MuxChildSender {
     id: i32,
     is_stream: IsStream,
     sink: Sender<Packet>,
-    phantom: PhantomData<E>,
 }
-impl<E> MuxChildSender<E>
-where E: error::Error + 'static,
-{
-    fn new(id: i32, is_stream: IsStream, sink: Sender<Packet>) -> MuxChildSender<E> {
+impl MuxChildSender {
+    fn new(id: i32, is_stream: IsStream, sink: Sender<Packet>) -> MuxChildSender {
         MuxChildSender {
             id,
             is_stream,
             sink,
-            phantom: PhantomData,
         }
     }
 
-    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), Error<E>> {
+    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), ChildError> {
         self.send_packet(Packet::new(self.is_stream,
                                      IsEnd::No,
                                      body_type,
                                      self.id,
-                                     body)).await
+                                     body)).await.context(Send)
     }
 
-    pub async fn send_end(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), Error<E>> {
+    pub async fn send_end(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), ChildError> {
         self.send_packet(Packet::new(self.is_stream,
                                      IsEnd::Yes,
                                      body_type,
                                      self.id,
-                                     body)).await
+                                     body)).await.context(SendEnd)
     }
 
-    pub async fn send_all<S>(&mut self, s: S) -> Result<(), Error<E>>
+    pub async fn send_all<S>(&mut self, s: S) -> Result<(), ChildError>
     where S: Stream<Item = (BodyType, Vec<u8>)> + Unpin,
     {
         let id = self.id;
         let is_stream = self.is_stream;
 
-        // TODO: better error context
         let mut stream = s.map(|(bt, b)| Packet::new(is_stream, IsEnd::No, bt, id, b));
-        self.sink.send_all(&mut stream).await.context(Channel)
+        self.sink.send_all(&mut stream).await.context(SendAll)
     }
 
-    async fn send_packet(&mut self, p: Packet) -> Result<(), Error<E>> {
-        self.sink.send(p).await.context(Channel)
+    async fn send_packet(&mut self, p: Packet) -> Result<(), SendError> {
+        self.sink.send(p).await
     }
 }
 
@@ -187,11 +196,11 @@ where E: error::Error + 'static,
 //   - out_sender (owned clone)
 
 pub fn mux<R, W, H, E, T>(r: R, w: W, handler: H)
-                          -> (MuxSender<E>, impl Future<Output = Result<(), Error<E>>>)
+                          -> (MuxSender, impl Future<Output = Result<(), Error<E>>>)
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
-    H: Fn(Packet, Sender<Packet>, Option<Receiver<Packet>>) -> T,
+    H: Fn(Packet, MuxChildSender, Option<Receiver<Packet>>) -> T,
     T: Future<Output = Result<(), E>>,
     E: error::Error + 'static,
 {
@@ -219,9 +228,9 @@ where
                     let mut response_sinks = response_sinks.lock().unwrap();
                     if let Some(ref mut sink) = response_sinks.get_mut(&p.id) {
                         if p.is_stream() && p.is_end() {
-                            sink.close().await.context(Channel)
+                            sink.close().await.context(SubStream)
                         } else {
-                            sink.send(p).await.context(Channel)
+                            sink.send(p).await.context(SubStream)
                         }
                     } else {
                         eprintln!("Unhandled response packet: {:?}", p);
@@ -235,9 +244,9 @@ where
                     if let Some(ref mut sink) = maybe_sink {
                         eprintln!("found continuation sink for id: {}", p.id);
                         if p.is_stream() && p.is_end() {
-                            sink.close().await.context(Channel)
+                            sink.close().await.context(SubStream)
                         } else {
-                            sink.send(p).await.context(Channel)
+                            sink.send(p).await.context(SubStream)
                         }
                     } else if p.is_stream() {
                         let (inn_sink, inn) = channel();
@@ -246,9 +255,11 @@ where
                             csinks.insert(p.id, inn_sink);
                         }
                         eprintln!("created new continuation sink for id: {}", p.id);
-                        handler(p, shared_sender.clone(), Some(inn)).await.context(Handler)
+                        let sender = MuxChildSender::new(-p.id, p.stream, shared_sender.clone());
+                        handler(p, sender, Some(inn)).await.context(Handler)
                     } else {
-                        handler(p, shared_sender.clone(), None).await.context(Handler)
+                        let sender = MuxChildSender::new(-p.id, p.stream, shared_sender.clone());
+                        handler(p, sender, None).await.context(Handler)
                     }
                 }
             }).map(|r| { eprintln!("IN_DONE"); r });
@@ -276,56 +287,41 @@ mod tests {
     enum RpcError {
         #[snafu(display("Failed to send Reverse response: {}", source))]
         Reverse {
-            source: SendError
+            source: ChildError
         },
 
         #[snafu(display("Failed to send Double (non-stream) response: {}", source))]
         DoubleBatch {
-            source: SendError
+            source: ChildError
         },
 
         #[snafu(display("Failed to send Double (stream) response: {}", source))]
         DoubleStream {
-            source: SendError
+            source: ChildError
         },
     }
 
-    async fn cool_rpc(p: Packet, mut out: Sender<Packet>, inn: Option<Receiver<Packet>>)
+    async fn cool_rpc(p: Packet, mut out: MuxChildSender, inn: Option<Receiver<Packet>>)
                       -> Result<(), RpcError> {
 
         let (method, args) = p.body.split_first().unwrap();
 
         match *method as char {
             'R' => { // Reverse
-                out.send(Packet::new(
-                    IsStream::No,
-                    IsEnd::Yes,
-                    BodyType::Binary,
-                    -p.id,
-                    args.iter().rev().map(|u| *u).collect(),
-                )).await.context(Reverse)
+                out.send(BodyType::Binary, args.iter().rev().map(|u| *u).collect())
+                    .await.context(Reverse)
             },
             'D' => { // Double each arg
                 if p.is_stream() {
-                    let inn = inn.unwrap();
-                    inn.map(|argp: Packet| {
+                    let mut inn = inn.unwrap().map(|argp: Packet| {
                         let x = argp.body.first().unwrap();
-                        Ok(Packet::new(
-                            IsStream::Yes,
-                            IsEnd::No,
-                            BodyType::Binary,
-                            -argp.id,
-                            vec![x * 2],
-                        ))
-                    }).forward(out).await.context(DoubleStream)
+                        (BodyType::Binary, vec![x * 2])
+                    });
+                    out.send_all(&mut inn).await.context(DoubleStream)
                 } else {
-                    out.send(Packet::new(
-                        IsStream::No,
-                        IsEnd::Yes,
-                        BodyType::Binary,
-                        -p.id,
-                        args.iter().map(|n| n * 2).collect(),
-                    )).await.context(DoubleBatch)
+                    out.send(BodyType::Binary,
+                             args.iter().map(|n| n * 2).collect())
+                        .await.context(DoubleBatch)
                 }
             },
             _ => {
