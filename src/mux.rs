@@ -1,12 +1,11 @@
 use crate::*;
-use futures::channel::mpsc::{self, Receiver, Sender, SendError};
+use futures::channel::mpsc;
 use futures::future::{join, FutureExt};
 use futures::stream::{Stream, StreamExt, TryStreamExt};
-use futures::sink::{Sink, SinkExt};
+use futures::sink::{SinkExt};
 use futures::io::{AsyncRead, AsyncWrite};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::marker::PhantomData;
 use std::error;
 
 use snafu::{futures::TryStreamExt as SnafuTSE, ResultExt, Snafu};
@@ -27,7 +26,7 @@ where HandlerErrorT: std::error::Error + 'static
 
     #[snafu(display("Sub stream failure: {}", source))]
     SubStream {
-        source: SendError
+        source: mpsc::SendError
     },
 
     #[snafu(display("Mux packet handler error: {}", source))]
@@ -37,22 +36,22 @@ where HandlerErrorT: std::error::Error + 'static
 }
 
 #[derive(Debug, Snafu)]
-pub enum ChildError {
+pub enum SubError {
     // TODO: better name, useful context, better messages
 
     #[snafu(display("Error sending packet: {}", source))]
     Send {
-        source: SendError
+        source: mpsc::SendError
     },
 
     #[snafu(display("Error sending stream end packet: {}", source))]
     SendEnd {
-        source: SendError
+        source: mpsc::SendError
     },
 
     #[snafu(display("Error sending stream: {}", source))]
     SendAll {
-        source: SendError
+        source: mpsc::SendError
     },
 }
 
@@ -61,23 +60,21 @@ pub enum ChildError {
 // outgoing requests.
 // Packets with id > 0 may be incoming requests, or may be
 // continuations of an incoming stream.
-type ChildSink = Sender<Packet>;
-type ChildStream = Receiver<Packet>;
+type ChildSink = mpsc::Sender<Packet>;
 type ChildSinkMap = Arc<Mutex<HashMap<i32, ChildSink>>>;
-
 fn child_sink_map() -> ChildSinkMap {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-pub struct MuxSender {
-    inner: Sender<Packet>,
+pub struct Sender {
+    inner: mpsc::Sender<Packet>,
     _id: i32,
     response_sinks: ChildSinkMap,
 }
 
-impl MuxSender {
-    fn new(inner: Sender<Packet>, response_sinks: ChildSinkMap) -> MuxSender {
-        MuxSender {
+impl Sender {
+    fn new(inner: mpsc::Sender<Packet>, response_sinks: ChildSinkMap) -> Sender {
+        Sender {
             inner,
             _id: 1,
             response_sinks,
@@ -95,7 +92,7 @@ impl MuxSender {
         id
     }
 
-    fn new_response_stream(&mut self, request_id: i32) -> ChildStream {
+    fn new_response_stream(&mut self, request_id: i32) -> SubReceiver {
         let (in_sink, in_stream) = channel();
         self.response_sinks.lock().unwrap().insert(-request_id, in_sink);
         in_stream
@@ -104,10 +101,8 @@ impl MuxSender {
     pub fn close(&mut self) {
         self.inner.close_channel();
     }
-}
 
-impl MuxSender {
-    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<ChildStream, ChildError> {
+    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<SubReceiver, SubError> {
         let out_id = self.next_id();
         let in_stream = self.new_response_stream(out_id);
 
@@ -116,11 +111,11 @@ impl MuxSender {
         Ok(in_stream)
     }
 
-    pub async fn send_duplex(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(MuxChildSender, ChildStream), ChildError> {
+    pub async fn send_duplex(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(SubSender, SubReceiver), SubError> {
         let out_id = self.next_id();
         let in_stream = self.new_response_stream(out_id);
 
-        let mut out = MuxChildSender {
+        let mut out = SubSender {
             id: out_id,
             is_stream: IsStream::Yes,
             sink: self.inner.clone(),
@@ -131,28 +126,31 @@ impl MuxSender {
     }
 }
 
-impl Drop for MuxSender {
+impl Drop for Sender {
     fn drop(&mut self) {
         self.close();
     }
 }
 
-// TODO: name
-pub struct MuxChildSender {
+
+// TODO: make opaque
+pub type SubReceiver = mpsc::Receiver<Packet>;
+
+pub struct SubSender {
     id: i32,
     is_stream: IsStream,
-    sink: Sender<Packet>,
+    sink: mpsc::Sender<Packet>,
 }
-impl MuxChildSender {
-    fn new(id: i32, is_stream: IsStream, sink: Sender<Packet>) -> MuxChildSender {
-        MuxChildSender {
+impl SubSender {
+    fn new(id: i32, is_stream: IsStream, sink: mpsc::Sender<Packet>) -> SubSender {
+        SubSender {
             id,
             is_stream,
             sink,
         }
     }
 
-    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), ChildError> {
+    pub async fn send(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), SubError> {
         self.send_packet(Packet::new(self.is_stream,
                                      IsEnd::No,
                                      body_type,
@@ -160,7 +158,7 @@ impl MuxChildSender {
                                      body)).await.context(Send)
     }
 
-    pub async fn send_end(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), ChildError> {
+    pub async fn send_end(&mut self, body_type: BodyType, body: Vec<u8>) -> Result<(), SubError> {
         self.send_packet(Packet::new(self.is_stream,
                                      IsEnd::Yes,
                                      body_type,
@@ -168,7 +166,7 @@ impl MuxChildSender {
                                      body)).await.context(SendEnd)
     }
 
-    pub async fn send_all<S>(&mut self, s: S) -> Result<(), ChildError>
+    pub async fn send_all<S>(&mut self, s: S) -> Result<(), SubError>
     where S: Stream<Item = (BodyType, Vec<u8>)> + Unpin,
     {
         let id = self.id;
@@ -178,7 +176,7 @@ impl MuxChildSender {
         self.sink.send_all(&mut stream).await.context(SendAll)
     }
 
-    async fn send_packet(&mut self, p: Packet) -> Result<(), SendError> {
+    async fn send_packet(&mut self, p: Packet) -> Result<(), mpsc::SendError> {
         self.sink.send(p).await
     }
 }
@@ -196,11 +194,11 @@ impl MuxChildSender {
 //   - out_sender (owned clone)
 
 pub fn mux<R, W, H, E, T>(r: R, w: W, handler: H)
-                          -> (MuxSender, impl Future<Output = Result<(), Error<E>>>)
+                          -> (Sender, impl Future<Output = Result<(), Error<E>>>)
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
-    H: Fn(Packet, MuxChildSender, Option<Receiver<Packet>>) -> T,
+    H: Fn(Packet, SubSender, Option<SubReceiver>) -> T,
     T: Future<Output = Result<(), E>>,
     E: error::Error + 'static,
 {
@@ -215,7 +213,7 @@ where
     let response_sinks = child_sink_map();
     let continuation_sinks = child_sink_map();
 
-    let sender = MuxSender::new(shared_sender.clone(), response_sinks.clone());
+    let sender = Sender::new(shared_sender.clone(), response_sinks.clone());
 
     let done = async move {
         let in_stream = PacketStream::new(r);
@@ -223,7 +221,6 @@ where
         const OPEN_STREAMS_LIMIT: usize = 128;
         let in_done = in_stream.context(Incoming)
             .try_for_each_concurrent(OPEN_STREAMS_LIMIT, |p| async {
-                eprintln!("mux received: {:?}", p);
                 if p.id < 0 {
                     let mut response_sinks = response_sinks.lock().unwrap();
                     if let Some(ref mut sink) = response_sinks.get_mut(&p.id) {
@@ -233,7 +230,7 @@ where
                             sink.send(p).await.context(SubStream)
                         }
                     } else {
-                        eprintln!("Unhandled response packet: {:?}", p);
+                        eprintln!("Unhandled response packet: {:?}", p); // TODO
                         Ok(())
                     }
                 } else {
@@ -242,7 +239,6 @@ where
                         csinks.get(&p.id).map(|s| s.clone())
                     };
                     if let Some(ref mut sink) = maybe_sink {
-                        eprintln!("found continuation sink for id: {}", p.id);
                         if p.is_stream() && p.is_end() {
                             sink.close().await.context(SubStream)
                         } else {
@@ -254,11 +250,10 @@ where
                             let mut csinks = continuation_sinks.lock().unwrap();
                             csinks.insert(p.id, inn_sink);
                         }
-                        eprintln!("created new continuation sink for id: {}", p.id);
-                        let sender = MuxChildSender::new(-p.id, p.stream, shared_sender.clone());
+                        let sender = SubSender::new(-p.id, p.stream, shared_sender.clone());
                         handler(p, sender, Some(inn)).await.context(Handler)
                     } else {
-                        let sender = MuxChildSender::new(-p.id, p.stream, shared_sender.clone());
+                        let sender = SubSender::new(-p.id, p.stream, shared_sender.clone());
                         handler(p, sender, None).await.context(Handler)
                     }
                 }
@@ -269,7 +264,7 @@ where
     (sender, done)
 }
 
-fn channel<T>() -> (Sender<T>, Receiver<T>) {
+fn channel<T>() -> (mpsc::Sender<T>, mpsc::Receiver<T>) {
     mpsc::channel::<T>(128) // Arbitrary
 }
 
@@ -287,21 +282,21 @@ mod tests {
     enum RpcError {
         #[snafu(display("Failed to send Reverse response: {}", source))]
         Reverse {
-            source: ChildError
+            source: SubError
         },
 
         #[snafu(display("Failed to send Double (non-stream) response: {}", source))]
         DoubleBatch {
-            source: ChildError
+            source: SubError
         },
 
         #[snafu(display("Failed to send Double (stream) response: {}", source))]
         DoubleStream {
-            source: ChildError
+            source: SubError
         },
     }
 
-    async fn cool_rpc(p: Packet, mut out: MuxChildSender, inn: Option<Receiver<Packet>>)
+    async fn cool_rpc(p: Packet, mut out: SubSender, inn: Option<SubReceiver>)
                       -> Result<(), RpcError> {
 
         let (method, args) = p.body.split_first().unwrap();
@@ -422,16 +417,6 @@ mod tests {
 
         server_out.close();
         pool.run_until(server_done).unwrap();
-    }
-
-    fn sb_packet(b: u8, id: i32) -> Packet {
-        Packet::new(
-            IsStream::Yes,
-            IsEnd::No,
-            BodyType::Binary,
-            id,
-            vec![b],
-        )
     }
 
     #[test]
