@@ -2,11 +2,10 @@ use crate::*;
 use futures::channel::mpsc::{self, Receiver, Sender, SendError};
 use futures::future::{join, FutureExt};
 use futures::stream::{Stream, StreamExt, TryStreamExt};
-use futures::sink::{Sink, SinkExt};
+use futures::sink::SinkExt;
 use futures::io::{AsyncRead, AsyncWrite};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::marker::PhantomData;
 use std::error;
 
 use snafu::{futures::TryStreamExt as SnafuTSE, ResultExt, Snafu};
