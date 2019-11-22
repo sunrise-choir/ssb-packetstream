@@ -12,20 +12,17 @@ use snafu::{ensure, ResultExt, Snafu};
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("Failed to receive packet: {}", source))]
-    Recv {
-        source: std::io::Error
-    },
+    Recv { source: std::io::Error },
 
     #[snafu(display("IO error while reading packet header: {}", source))]
-    Header {
-        source: std::io::Error
-    },
+    Header { source: std::io::Error },
 
-    #[snafu(display("IO error while reading packet body. Body size: {}. Error: {}", size, source))]
-    Body {
-        size: usize,
-        source: std::io::Error
-    },
+    #[snafu(display(
+        "IO error while reading packet body. Body size: {}. Error: {}",
+        size,
+        source
+    ))]
+    Body { size: usize, source: std::io::Error },
 
     #[snafu(display("PacketStream underlying reader closed without goodbye"))]
     NoGoodbye {},
@@ -50,7 +47,9 @@ where
     let id = BigEndian::read_i32(&head[5..]);
 
     let mut body = vec![0; body_len];
-    r.read_exact(&mut body).await.context(Body{size: body_len})?;
+    r.read_exact(&mut body)
+        .await
+        .context(Body { size: body_len })?;
 
     Ok(Some(Packet::new(
         head[0].into(),

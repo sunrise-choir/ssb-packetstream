@@ -12,26 +12,16 @@ use snafu::{ResultExt, Snafu};
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("Failed to send goodbye packet: {}", source))]
-    SendGoodbye {
-        source: std::io::Error
-    },
+    SendGoodbye { source: std::io::Error },
 
     #[snafu(display("Failed to send packet: {}", source))]
-    Send {
-        source: std::io::Error
-    },
+    Send { source: std::io::Error },
 
     #[snafu(display("Failed to flush sink: {}", source))]
-    Flush {
-        source: std::io::Error
-    },
+    Flush { source: std::io::Error },
 
     #[snafu(display("Error while closing sink: {}", source))]
-    Close {
-        source: std::io::Error
-    },
-
-
+    Close { source: std::io::Error },
 }
 
 async fn send<W>(mut w: W, msg: Packet) -> (W, Result<(), Error>)
@@ -51,7 +41,7 @@ where
     W: AsyncWrite + Unpin + 'static,
 {
     let r = w.write_all(&[0; 9]).await;
-    (w, r.map(|_| ()).context(SendGoodbye{}))
+    (w, r.map(|_| ()).context(SendGoodbye {}))
 }
 
 /// #Examples

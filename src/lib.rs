@@ -3,10 +3,10 @@ mod packet;
 mod sink;
 mod stream;
 
+pub use mux::*;
 pub use packet::*;
 pub use sink::*;
 pub use stream::*;
-pub use mux::*;
 
 use core::future::Future;
 use core::pin::Pin;
@@ -19,8 +19,8 @@ mod tests {
     use byteorder::{BigEndian, ByteOrder};
     use futures::executor::block_on;
     use futures::io::AsyncReadExt;
-    use futures::{future::join, stream::iter, SinkExt, TryStreamExt};
     use futures::stream::StreamExt;
+    use futures::{future::join, stream::iter, SinkExt, TryStreamExt};
 
     #[test]
     fn encode() {
@@ -96,9 +96,7 @@ mod tests {
         };
 
         let recv = async {
-            let r: Vec<Packet> = stream
-                .try_collect()
-                .await.unwrap();
+            let r: Vec<Packet> = stream.try_collect().await.unwrap();
             r
         };
 
@@ -180,5 +178,4 @@ mod tests {
             assert_eq!(n, 0);
         });
     }
-
 }
