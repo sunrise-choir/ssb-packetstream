@@ -56,14 +56,12 @@ where
 
 /// #Examples
 /// ```rust
-/// #![feature(async_await)]
-///
-/// use std::io::Cursor;
+/// use futures::io::Cursor;
 /// use futures::executor::block_on;
-/// use futures::prelude::SinkExt;
+/// use futures::sink::SinkExt;
 /// use ssb_packetstream::*;
 ///
-/// let mut sink = PacketSink::new(Cursor::new(vec![0; 14]));
+/// let mut sink = PacketSink::new(Cursor::new(vec![0u8; 14]));
 /// block_on(async {
 ///     sink.send(Packet::new(IsStream::Yes,
 ///                                  IsEnd::No,

@@ -20,6 +20,7 @@ mod tests {
     use futures::executor::block_on;
     use futures::io::AsyncReadExt;
     use futures::{future::join, stream::iter, SinkExt, TryStreamExt};
+    use futures::stream::StreamExt;
 
     #[test]
     fn encode() {
@@ -89,7 +90,7 @@ mod tests {
         let stream = PacketStream::new(r);
 
         let send = async {
-            let mut items = iter(msgs);
+            let mut items = iter(msgs).map(|m| Ok(m));
             sink.send_all(&mut items).await.unwrap();
             sink.close().await.unwrap();
         };

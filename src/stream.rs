@@ -74,7 +74,8 @@ where
 /// #![feature(async_await)]
 ///
 /// use futures::executor::block_on;
-/// use futures::prelude::{SinkExt, TryStreamExt};
+/// use futures::sink::SinkExt;
+/// use futures::stream::TryStreamExt;
 /// use ssb_packetstream::*;
 ///
 /// let p = Packet::new(IsStream::Yes,

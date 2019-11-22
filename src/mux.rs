@@ -336,7 +336,7 @@ mod tests {
         let (server_w, client_r) = async_ringbuffer::ring_buffer(2048);
 
         let mut pool = LocalPool::new();
-        let mut spawner = pool.spawner();
+        let spawner = pool.spawner();
 
         let (mut server_out, server_done) = mux(server_r, server_w, cool_rpc);
 
@@ -439,7 +439,7 @@ mod tests {
         let (server_w, client_r) = async_ringbuffer::ring_buffer(2048);
 
         let mut pool = LocalPool::new();
-        let mut spawner = pool.spawner();
+        let spawner = pool.spawner();
 
         let (mut server_out, server_done) = mux(server_r, server_w, cool_rpc);
         let (mut client_out, client_done) = mux(client_r, client_w, cool_rpc);
