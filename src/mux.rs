@@ -207,7 +207,7 @@ where
     let (shared_sender, recv) = channel();
     let out_done = async move {
         let r = recv.map(|p| Ok(p)).forward(PacketSink::new(w)).await.context(Outgoing);
-        eprintln!("FORWARDED ALL");
+        // eprintln!("FORWARDED ALL");
         r
     };
 
@@ -222,7 +222,6 @@ where
         const OPEN_STREAMS_LIMIT: usize = 128;
         let in_done = in_stream.context(Incoming)
             .try_for_each_concurrent(OPEN_STREAMS_LIMIT, |p: Packet| async {
-                eprintln!("mux received: {:?}", p);
                 if p.id < 0 {
                     let mut response_sinks = response_sinks.lock().unwrap();
                     if let Some(ref mut sink) = response_sinks.get_mut(&p.id) {
@@ -241,7 +240,6 @@ where
                         csinks.get(&p.id).map(|s| s.clone())
                     };
                     if let Some(ref mut sink) = maybe_sink {
-                        eprintln!("found continuation sink for id: {}", p.id);
                         if p.is_stream() && p.is_end() {
                             sink.close().await.context(SubStream)
                         } else {
@@ -253,7 +251,6 @@ where
                             let mut csinks = continuation_sinks.lock().unwrap();
                             csinks.insert(p.id, inn_sink);
                         }
-                        eprintln!("created new continuation sink for id: {}", p.id);
                         let sender = MuxChildSender::new(-p.id, p.stream, shared_sender.clone());
                         handler(p, sender, Some(inn)).await.context(Handler)
                     } else {
@@ -261,7 +258,7 @@ where
                         handler(p, sender, None).await.context(Handler)
                     }
                 }
-            }).map(|r| { eprintln!("IN_DONE"); r });
+            });
         let (in_r, out_r) = join(in_done, out_done).await;
         in_r.or(out_r)
     };
