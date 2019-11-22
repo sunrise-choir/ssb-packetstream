@@ -1,5 +1,3 @@
-#![feature(async_await)]
-
 mod mux;
 mod packet;
 mod sink;

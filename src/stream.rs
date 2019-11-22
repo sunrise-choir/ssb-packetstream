@@ -2,7 +2,7 @@ use byteorder::{BigEndian, ByteOrder};
 use core::pin::Pin;
 use core::task::{Context, Poll, Poll::Pending, Poll::Ready};
 use futures::io::{AsyncRead, AsyncReadExt};
-use futures::stream::TryStream;
+use futures::stream::Stream;
 use std::mem::replace;
 
 use crate::packet::*;
@@ -148,11 +148,10 @@ where
     }
 }
 
-impl<R: AsyncRead + Unpin + 'static> TryStream for PacketStream<R> {
-    type Ok = Packet;
-    type Error = Error;
+impl<R: AsyncRead + Unpin + 'static> Stream for PacketStream<R> {
+    type Item = Result<Packet, Error>;
 
-    fn try_poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Result<Self::Ok, Self::Error>>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let (state, poll) = next(self.state.take(), cx);
         self.state = state;
         poll

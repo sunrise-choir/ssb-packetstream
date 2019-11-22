@@ -173,7 +173,7 @@ impl MuxChildSender {
         let id = self.id;
         let is_stream = self.is_stream;
 
-        let mut stream = s.map(|(bt, b)| Packet::new(is_stream, IsEnd::No, bt, id, b));
+        let mut stream = s.map(|(bt, b)| Ok(Packet::new(is_stream, IsEnd::No, bt, id, b)));
         self.sink.send_all(&mut stream).await.context(SendAll)
     }
 
@@ -221,7 +221,7 @@ where
 
         const OPEN_STREAMS_LIMIT: usize = 128;
         let in_done = in_stream.context(Incoming)
-            .try_for_each_concurrent(OPEN_STREAMS_LIMIT, |p| async {
+            .try_for_each_concurrent(OPEN_STREAMS_LIMIT, |p: Packet| async {
                 eprintln!("mux received: {:?}", p);
                 if p.id < 0 {
                     let mut response_sinks = response_sinks.lock().unwrap();

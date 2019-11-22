@@ -164,13 +164,13 @@ impl<W> Sink<Packet> for PacketSink<W>
 where
     W: AsyncWrite + Unpin + 'static,
 {
-    type SinkError = Error;
+    type Error = Error;
 
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::SinkError>> {
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         self.poll_flush(cx)
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: Packet) -> Result<(), Self::SinkError> {
+    fn start_send(mut self: Pin<&mut Self>, item: Packet) -> Result<(), Self::Error> {
         match self.state.take() {
             State::Ready(w) => {
                 self.state = State::Sending(Box::pin(send(w, item)));
@@ -180,13 +180,13 @@ where
         }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::SinkError>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         let (state, poll) = flush(self.state.take(), cx);
         self.state = state;
         poll
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::SinkError>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         let (state, poll) = close(self.state.take(), cx);
         self.state = state;
         poll
