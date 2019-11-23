@@ -1,6 +1,6 @@
 use crate::*;
 use futures::channel::mpsc::{self, Receiver, SendError, Sender};
-use futures::future::{join, FutureExt};
+use futures::future::{join, FutureExt, TryFuture, TryFutureExt};
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::sink::SinkExt;
 use futures::stream::{Stream, StreamExt, TryStreamExt};
@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::error;
 use std::sync::{Arc, Mutex};
 
-use snafu::{futures::TryStreamExt as SnafuTSE, ResultExt, Snafu};
+use snafu::{futures::TryStreamExt as SnafuTSE, futures::TryFutureExt as SnafuTFE,  ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 pub enum Error<HandlerErrorT>
@@ -25,7 +25,7 @@ where
     SubStream { source: SendError },
 
     #[snafu(display("Mux packet handler error: {}", source))]
-    Handler { source: HandlerErrorT },
+    HandlerError { source: HandlerErrorT },
 }
 
 #[derive(Debug, Snafu)]
@@ -199,6 +199,13 @@ impl MuxChildSender {
 //   - &mut response_sink_map
 //   - out_sender (owned clone)
 
+pub trait Handler
+where
+{
+    type T;
+    fn handle(&self, packet: Packet, sender: MuxChildSender, receiver: Option<Receiver<Packet>>) -> Self::T;
+}
+
 pub fn mux<R, W, H, E, T>(
     r: R,
     w: W,
@@ -207,7 +214,7 @@ pub fn mux<R, W, H, E, T>(
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
-    H: Fn(Packet, MuxChildSender, Option<Receiver<Packet>>) -> T,
+    H: Handler<T=T>,
     T: Future<Output = Result<(), E>>,
     E: error::Error + 'static,
 {
@@ -267,11 +274,13 @@ where
                                 }
                                 let sender =
                                     MuxChildSender::new(-p.id, p.stream, shared_sender.clone());
-                                handler(p, sender, Some(inn)).await.context(Handler)
+                                handler.handle(p, sender, Some(inn)).await.context(HandlerError)
                             } else {
                                 let sender =
                                     MuxChildSender::new(-p.id, p.stream, shared_sender.clone());
-                                handler(p, sender, None).await.context(Handler)
+                                handler.handle(p, sender, None).await.context(HandlerError)
+                            
+
                             }
                         }
                     }
@@ -306,40 +315,46 @@ mod tests {
         DoubleStream { source: ChildError },
     }
 
-    async fn cool_rpc(
-        p: Packet,
-        mut out: MuxChildSender,
-        inn: Option<Receiver<Packet>>,
-    ) -> Result<(), RpcError> {
-        let (method, args) = p.body.split_first().unwrap();
+    struct CoolRPC{}
+    impl<T, E> Handler<T,E> for CoolRPC{
+        async fn handle(
+            &self,
+            p: Packet,
+            mut out: MuxChildSender,
+            inn: Option<Receiver<Packet>>,
+        ) -> Result<(), RpcError> {
+            let (method, args) = p.body.split_first().unwrap();
 
-        match *method as char {
-            'R' => {
-                // Reverse
-                out.send(BodyType::Binary, args.iter().rev().map(|u| *u).collect())
-                    .await
-                    .context(Reverse)
-            }
-            'D' => {
-                // Double each arg
-                if p.is_stream() {
-                    let mut inn = inn.unwrap().map(|argp: Packet| {
-                        let x = argp.body.first().unwrap();
-                        (BodyType::Binary, vec![x * 2])
-                    });
-                    out.send_all(&mut inn).await.context(DoubleStream)
-                } else {
-                    out.send(BodyType::Binary, args.iter().map(|n| n * 2).collect())
+            match *method as char {
+                'R' => {
+                    // Reverse
+                    out.send(BodyType::Binary, args.iter().rev().map(|u| *u).collect())
                         .await
-                        .context(DoubleBatch)
+                        .context(Reverse)
+                }
+                'D' => {
+                    // Double each arg
+                    if p.is_stream() {
+                        let mut inn = inn.unwrap().map(|argp: Packet| {
+                            let x = argp.body.first().unwrap();
+                            (BodyType::Binary, vec![x * 2])
+                        });
+                        out.send_all(&mut inn).await.context(DoubleStream)
+                    } else {
+                        out.send(BodyType::Binary, args.iter().map(|n| n * 2).collect())
+                            .await
+                            .context(DoubleBatch)
+                    }
+                }
+                _ => {
+                    eprintln!("CoolRPC unrecognized packet: {:?}", p);
+                    Ok(())
                 }
             }
-            _ => {
-                eprintln!("CoolRPC unrecognized packet: {:?}", p);
-                Ok(())
-            }
         }
+
     }
+
 
     #[test]
     fn mux_one_way() {
