@@ -224,8 +224,7 @@ where
 {
     let (shared_sender, recv) = channel();
     let out_done = async move {
-        recv
-            .map(|p| Ok(p))
+        recv.map(|p| Ok(p))
             .forward(PacketSink::new(w))
             .await
             .context(Outgoing)
@@ -276,11 +275,14 @@ where
                                 }
                                 let sender =
                                     ChildSender::new(-p.id, p.stream, shared_sender.clone());
-                                handler.handle(p, sender, Some(inn)).await.context(PacketHandler)
+                                handler
+                                    .handle(p, sender, Some(inn))
+                                    .await
+                                    .context(PacketHandler)
                             } else {
                                 let sender =
                                     ChildSender::new(-p.id, p.stream, shared_sender.clone());
-				let inn: Option<ChildReceiver> = None;
+                                let inn: Option<ChildReceiver> = None;
                                 handler.handle(p, sender, inn).await.context(PacketHandler)
                             }
                         }
