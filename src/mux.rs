@@ -1,6 +1,7 @@
 use crate::*;
+use async_trait::async_trait;
 use futures::channel::mpsc::{self, Receiver, SendError, Sender};
-use futures::future::{join, FutureExt};
+use futures::future::join;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::sink::SinkExt;
 use futures::stream::{Stream, StreamExt, TryStreamExt};
@@ -8,7 +9,7 @@ use std::collections::HashMap;
 use std::error;
 use std::sync::{Arc, Mutex};
 
-use snafu::{futures::TryStreamExt as SnafuTSE, ResultExt, Snafu};
+use snafu::{futures::TryStreamExt as _, ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 pub enum Error<HandlerErrorT>
@@ -187,6 +188,18 @@ impl MuxChildSender {
     }
 }
 
+#[async_trait]
+pub trait MuxHandler {
+    type Error;
+
+    async fn handle(
+        &self,
+        p: Packet,
+        out: MuxChildSender,
+        inn: Option<Receiver<Packet>>,
+    ) -> Result<(), Self::Error>;
+}
+
 // Inbound side needs:
 //   - &mut response_sink_map     (for ids < 0)
 //   - &mut continuation_sink_map (for ids > 0)
@@ -199,7 +212,7 @@ impl MuxChildSender {
 //   - &mut response_sink_map
 //   - out_sender (owned clone)
 
-pub fn mux<R, W, H, E, T>(
+pub fn mux<R, W, H, E>(
     r: R,
     w: W,
     handler: H,
@@ -207,8 +220,7 @@ pub fn mux<R, W, H, E, T>(
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
-    H: Fn(Packet, MuxChildSender, Option<Receiver<Packet>>) -> T,
-    T: Future<Output = Result<(), E>>,
+    H: MuxHandler<Error = E>,
     E: error::Error + 'static,
 {
     let (shared_sender, recv) = channel();
@@ -267,11 +279,11 @@ where
                                 }
                                 let sender =
                                     MuxChildSender::new(-p.id, p.stream, shared_sender.clone());
-                                handler(p, sender, Some(inn)).await.context(Handler)
+                                handler.handle(p, sender, Some(inn)).await.context(Handler)
                             } else {
                                 let sender =
                                     MuxChildSender::new(-p.id, p.stream, shared_sender.clone());
-                                handler(p, sender, None).await.context(Handler)
+                                handler.handle(p, sender, None).await.context(Handler)
                             }
                         }
                     }
@@ -306,37 +318,44 @@ mod tests {
         DoubleStream { source: ChildError },
     }
 
-    async fn cool_rpc(
-        p: Packet,
-        mut out: MuxChildSender,
-        inn: Option<Receiver<Packet>>,
-    ) -> Result<(), RpcError> {
-        let (method, args) = p.body.split_first().unwrap();
+    struct CoolRpc {}
+    #[async_trait]
+    impl MuxHandler for CoolRpc {
+        type Error = RpcError;
 
-        match *method as char {
-            'R' => {
-                // Reverse
-                out.send(BodyType::Binary, args.iter().rev().map(|u| *u).collect())
-                    .await
-                    .context(Reverse)
-            }
-            'D' => {
-                // Double each arg
-                if p.is_stream() {
-                    let mut inn = inn.unwrap().map(|argp: Packet| {
-                        let x = argp.body.first().unwrap();
-                        (BodyType::Binary, vec![x * 2])
-                    });
-                    out.send_all(&mut inn).await.context(DoubleStream)
-                } else {
-                    out.send(BodyType::Binary, args.iter().map(|n| n * 2).collect())
+        async fn handle(
+            &self,
+            p: Packet,
+            mut out: MuxChildSender,
+            inn: Option<Receiver<Packet>>,
+        ) -> Result<(), RpcError> {
+            let (method, args) = p.body.split_first().unwrap();
+
+            match *method as char {
+                'R' => {
+                    // Reverse
+                    out.send(BodyType::Binary, args.iter().rev().map(|u| *u).collect())
                         .await
-                        .context(DoubleBatch)
+                        .context(Reverse)
                 }
-            }
-            _ => {
-                eprintln!("CoolRPC unrecognized packet: {:?}", p);
-                Ok(())
+                'D' => {
+                    // Double each arg
+                    if p.is_stream() {
+                        let mut inn = inn.unwrap().map(|argp: Packet| {
+                            let x = argp.body.first().unwrap();
+                            (BodyType::Binary, vec![x * 2])
+                        });
+                        out.send_all(&mut inn).await.context(DoubleStream)
+                    } else {
+                        out.send(BodyType::Binary, args.iter().map(|n| n * 2).collect())
+                            .await
+                            .context(DoubleBatch)
+                    }
+                }
+                _ => {
+                    eprintln!("CoolRPC unrecognized packet: {:?}", p);
+                    Ok(())
+                }
             }
         }
     }
@@ -349,7 +368,7 @@ mod tests {
         let mut pool = LocalPool::new();
         let spawner = pool.spawner();
 
-        let (mut server_out, server_done) = mux(server_r, server_w, cool_rpc);
+        let (mut server_out, server_done) = mux(server_r, server_w, CoolRpc {});
 
         let server_done = spawner.spawn_local_with_handle(server_done).unwrap();
 
@@ -453,10 +472,6 @@ mod tests {
         pool.run_until(server_done).unwrap();
     }
 
-    fn sb_packet(b: u8, id: i32) -> Packet {
-        Packet::new(IsStream::Yes, IsEnd::No, BodyType::Binary, id, vec![b])
-    }
-
     #[test]
     fn mux_two_way() {
         let (client_w, server_r) = async_ringbuffer::ring_buffer(2048);
@@ -465,8 +480,8 @@ mod tests {
         let mut pool = LocalPool::new();
         let spawner = pool.spawner();
 
-        let (mut server_out, server_done) = mux(server_r, server_w, cool_rpc);
-        let (mut client_out, client_done) = mux(client_r, client_w, cool_rpc);
+        let (mut server_out, server_done) = mux(server_r, server_w, CoolRpc {});
+        let (mut client_out, client_done) = mux(client_r, client_w, CoolRpc {});
 
         let _server_done = spawner.spawn_local_with_handle(server_done).unwrap();
         let _client_done = spawner.spawn_local_with_handle(client_done).unwrap();

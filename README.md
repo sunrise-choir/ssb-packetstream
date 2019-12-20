@@ -5,8 +5,6 @@
 An implementation of the [packet-stream protocol](https://ssbc.github.io/scuttlebutt-protocol-guide/index.html#rpc-protocol) used by Secure Scuttlebutt.
 
 ```rust
-#![feature(async_await)]
-
 use futures::prelude::{SinkExt, StreamExt};
 use packetstream::*;
 

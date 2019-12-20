@@ -70,8 +70,6 @@ where
 
 /// # Examples
 /// ```rust
-/// #![feature(async_await)]
-///
 /// use futures::executor::block_on;
 /// use futures::sink::SinkExt;
 /// use futures::stream::TryStreamExt;

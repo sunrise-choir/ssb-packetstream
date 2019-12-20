@@ -54,13 +54,17 @@ where
 /// let mut sink = PacketSink::new(Cursor::new(vec![0u8; 14]));
 /// block_on(async {
 ///     sink.send(Packet::new(IsStream::Yes,
-///                                  IsEnd::No,
-///                                  BodyType::Json,
-///                                  123,
-///                                  vec![1,2,3,4,5])).await;
+///                           IsEnd::No,
+///                           BodyType::Json,
+///                           123,
+///                           vec![1,2,3,4,5])).await;
 ///     sink.close().await;
 ///     let buf = sink.into_inner().into_inner();
-///     assert_eq!(&buf, &[0b0000_1010, 0, 0, 0, 5, 0, 0, 0, 123, 1, 2, 3, 4, 5]);
+///     assert_eq!(&buf, &[0b0000_1010,   // flags
+///                        0, 0, 0, 5,    // body length
+///                        0, 0, 0, 123,  // packet id
+///                        1, 2, 3, 4, 5, // body
+///                        0, 0, 0, 0, 0, 0, 0, 0, 0]); // goodbye packet
 /// });
 /// ```
 pub struct PacketSink<W> {
