@@ -1,9 +1,8 @@
-mod mux;
+pub mod mux;
 mod packet;
 mod sink;
 mod stream;
 
-pub use mux::*;
 pub use packet::*;
 pub use sink::*;
 pub use stream::*;
