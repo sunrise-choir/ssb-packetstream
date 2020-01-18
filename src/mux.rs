@@ -224,7 +224,7 @@ where
 {
     let (shared_sender, recv) = channel();
     let out_done = async move {
-        recv.map(|p| Ok(p))
+        recv.map(Ok)
             .forward(PacketSink::new(w))
             .await
             .context(Outgoing)
@@ -259,7 +259,7 @@ where
                         } else {
                             let mut maybe_sink = {
                                 let csinks = continuation_sinks.lock().unwrap();
-                                csinks.get(&p.id).map(|s| s.clone())
+                                csinks.get(&p.id).cloned()
                             };
                             if let Some(ref mut sink) = maybe_sink {
                                 if p.is_stream() && p.is_end() {
