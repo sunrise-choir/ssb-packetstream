@@ -3,11 +3,12 @@ use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::future::join;
 use futures::io::{AsyncRead, AsyncWrite};
+use futures::lock::Mutex;
 use futures::sink::SinkExt;
 use futures::stream::{Stream, StreamExt, TryStreamExt};
 use std::collections::HashMap;
 use std::error;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use snafu::{futures::TryStreamExt as _, ResultExt, Snafu};
 
@@ -79,11 +80,11 @@ impl Sender {
         id
     }
 
-    fn new_response_stream(&mut self, request_id: i32) -> ChildReceiver {
+    async fn new_response_stream(&mut self, request_id: i32) -> ChildReceiver {
         let (in_sink, in_stream) = channel();
         self.response_sinks
             .lock()
-            .unwrap()
+            .await
             .insert(-request_id, in_sink);
         in_stream
     }
@@ -100,7 +101,7 @@ impl Sender {
         body: Vec<u8>,
     ) -> Result<ChildReceiver, SendError> {
         let out_id = self.next_id();
-        let in_stream = self.new_response_stream(out_id);
+        let in_stream = self.new_response_stream(out_id).await;
 
         let p = Packet::new(IsStream::No, IsEnd::No, body_type, out_id, body);
         self.inner.send(p).await.context(Send)?;
@@ -113,7 +114,7 @@ impl Sender {
         body: Vec<u8>,
     ) -> Result<(ChildSender, ChildReceiver), SendError> {
         let out_id = self.next_id();
-        let in_stream = self.new_response_stream(out_id);
+        let in_stream = self.new_response_stream(out_id).await;
 
         let mut out = ChildSender {
             id: out_id,
@@ -245,7 +246,7 @@ where
                 .try_for_each_concurrent(OPEN_STREAMS_LIMIT, |p: Packet| {
                     async {
                         if p.id < 0 {
-                            let mut response_sinks = response_sinks.lock().unwrap();
+                            let mut response_sinks = response_sinks.lock().await;
                             if let Some(ref mut sink) = response_sinks.get_mut(&p.id) {
                                 if p.is_stream() && p.is_end() {
                                     sink.close().await.context(SubStream)
@@ -258,7 +259,7 @@ where
                             }
                         } else {
                             let mut maybe_sink = {
-                                let csinks = continuation_sinks.lock().unwrap();
+                                let csinks = continuation_sinks.lock().await;
                                 csinks.get(&p.id).cloned()
                             };
                             if let Some(ref mut sink) = maybe_sink {
@@ -270,7 +271,7 @@ where
                             } else if p.is_stream() {
                                 let (inn_sink, inn) = channel();
                                 {
-                                    let mut csinks = continuation_sinks.lock().unwrap();
+                                    let mut csinks = continuation_sinks.lock().await;
                                     csinks.insert(p.id, inn_sink);
                                 }
                                 let sender =
