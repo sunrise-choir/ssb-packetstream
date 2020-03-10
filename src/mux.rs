@@ -133,6 +133,7 @@ impl Drop for Sender {
 }
 
 // TODO: name
+#[derive(Clone)]
 pub struct ChildSender {
     id: i32,
     is_stream: IsStream,
