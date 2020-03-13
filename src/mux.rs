@@ -54,6 +54,7 @@ fn child_sink_map() -> ChildSinkMap {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+#[derive(Clone)]
 pub struct Sender {
     inner: mpsc::Sender<Packet>,
     _id: i32,
