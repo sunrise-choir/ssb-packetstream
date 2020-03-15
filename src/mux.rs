@@ -116,6 +116,7 @@ impl Sender {
         body: Vec<u8>,
     ) -> Result<(ChildSender, ChildReceiver), SendError> {
         let out_id = self.next_id().await;
+        eprintln!("next id is {}", out_id);
         let in_stream = self.new_response_stream(out_id).await;
 
         let mut out = ChildSender {
@@ -129,11 +130,6 @@ impl Sender {
     }
 }
 
-impl Drop for Sender {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
 
 // TODO: name
 #[derive(Clone)]
