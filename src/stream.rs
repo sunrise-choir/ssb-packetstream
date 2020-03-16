@@ -2,7 +2,7 @@ use byteorder::{BigEndian, ByteOrder};
 use core::pin::Pin;
 use core::task::{Context, Poll, Poll::Pending, Poll::Ready};
 use futures::io::{AsyncRead, AsyncReadExt};
-use futures::stream::Stream;
+use futures::stream::{FusedStream, Stream};
 use std::mem::replace;
 
 use crate::packet::*;
@@ -153,5 +153,11 @@ impl<R: AsyncRead + Unpin + 'static> Stream for PacketStream<R> {
         let (state, poll) = next(self.state.take(), cx);
         self.state = state;
         poll
+    }
+}
+
+impl<R: AsyncRead + Unpin + 'static> FusedStream for PacketStream<R> {
+    fn is_terminated(&self) -> bool {
+        self.is_closed()
     }
 }

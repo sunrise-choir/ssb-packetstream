@@ -45,6 +45,12 @@ impl Packet {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Body {
+    data_type: BodyType,
+    data: Vec<u8>,
+}
+
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum IsStream {
