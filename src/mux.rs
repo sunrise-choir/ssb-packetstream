@@ -63,6 +63,8 @@ pub struct Connection<Id, R, W> {
     packet_recv: mpsc::Receiver<Packet>,
 
     child_streams: HashMap<i32, mpsc::Sender<Packet>>,
+
+    /// Only contains incoming request ids (positive numbers)
     closed_streams: HashSet<i32>,
 }
 
@@ -172,14 +174,15 @@ where
     async fn process_command(&mut self, command: Command) -> Result<()> {
         match command {
             Command::NewRequest(is_stream, body_type, data, tx) => {
-                debug!("Creating new outgoing request stream");
                 let out_id = self.next_id();
                 let in_id = -out_id;
                 let (in_sink, in_stream) = mpsc::channel(32);
 
                 let packet = Packet::new(is_stream, IsEnd::No, body_type, out_id, data);
-                trace!("Sending packet: {:?}", packet);
-                trace!("Created child stream for response(s) with id: {}", in_id);
+                trace!(
+                    "Creating new child stream for outgoing packet: {:?}",
+                    packet
+                );
 
                 self.child_streams.insert(in_id, in_sink);
                 self.sink.send(packet).await.context(Outgoing)?;
@@ -229,57 +232,45 @@ where
 
     #[instrument]
     async fn process_out_packet(&mut self, p: Packet) -> Result<()> {
-        // XXX: this closes the child stream too quickly. Need to close after
-        //  receiving expected responses.
-
-        // if p.is_stream() && p.is_end() {
-        //     // Close incoming stream for -p.id
-        //     let in_id = -p.id;
-        //     if let Some(mut sender) = self.child_streams.remove(&in_id) {
-        //         sender
-        //             .close()
-        //             .await
-        //             .context(ChildStreamClose { id: in_id })?;
-        //         self.closed_streams.insert(in_id);
-        //         trace!(in_id, "Closed incoming stream");
-        //     }
-        // }
+        trace!(?p, "Sending packet");
         self.sink.send(p).await.context(Outgoing)
     }
 
     #[instrument]
     async fn process_in_packet(&mut self, p: Packet) -> Result<Option<ChildDuplex>> {
         if p.is_end() || (p.id < 0 && !p.is_stream()) {
-            // There should always be an entry in child_streams (or closed_streams)
-            // for such a packet (I think), and it should be the
-            // last packet with this id.
+            // Last packet for this stream id. We should have already created
+            // a child stream for this id.
+
             let id = p.id;
-            if let Some(mut sender) = self.child_streams.remove(&id) {
-                trace!("Got final packet of stream id {}. Closing stream.", id);
-                sender.send(p).await.context(ChildStreamSend { id })?;
-                sender.close().await.context(ChildStreamClose { id })?;
-                self.closed_streams.insert(id);
-            } else if !self.closed_streams.contains(&p.id) {
-                trace!("Got final packet of unrecognized stream; ignoring.");
+            if let Some(mut child) = self.child_streams.remove(&id) {
+                trace!("Rcvd final packet of stream id {}. Closing stream.", id);
+                child.send(p).await.context(ChildStreamSend { id })?;
+                child.close().await.context(ChildStreamClose { id })?;
+                if id > 0 {
+                    self.closed_streams.insert(id);
+                }
+            } else {
+                trace!("Rcvd final packet for unknown or closed stream id: {}", id);
             }
+
             return Ok(None);
         }
 
-        if let Some(ref mut stream) = self.child_streams.get_mut(&p.id) {
+        if let Some(ref mut child) = self.child_streams.get_mut(&p.id) {
             trace!("Found child stream for id: {}", p.id);
             let id = p.id;
-            stream.send(p).await.context(ChildStreamSend { id })?;
-            return Ok(None);
-        }
-
-        if self.closed_streams.contains(&p.id) {
-            trace!("Received packet for closed stream id: {}", &p.id);
+            child.send(p).await.context(ChildStreamSend { id })?;
             return Ok(None);
         }
 
         if p.id < 0 {
-            trace!("Unrecognized response packet id");
+            trace!("Rcvd unrecognized response packet id: {}", p.id);
             return Ok(None);
+        }
+
+        if self.closed_streams.contains(&p.id) {
+            trace!("Rcvd packet for closed stream id: {}", p.id);
         }
 
         // New request.
