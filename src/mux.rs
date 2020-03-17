@@ -189,7 +189,7 @@ where
                 tx.send(Ok(ChildStream {
                     id: in_id,
                     inner: in_stream,
-                }));
+                })).unwrap_or(());
 
                 Ok(())
             }
@@ -420,7 +420,7 @@ impl FusedStream for ChildStream {
 }
 
 /// Outgoing (child) packet stream to remote peer.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChildSink {
     id: i32,
     is_stream: IsStream,
